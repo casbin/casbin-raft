@@ -1,0 +1,28 @@
+name: Default
+
+on:
+  push:
+    branches:
+      - master
+    pull_request:
+      - master
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: [1.13, 1.14]
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Get dependencies
+        run: go get -v -t -d ./...
+
+      - name: Test
+        run: go test -v .
