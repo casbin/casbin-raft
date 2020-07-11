@@ -2,6 +2,7 @@ package casbinraft
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"github.com/coreos/etcd/pkg/transport"
 
 	"github.com/casbin/casbin/v2"
 	"github.com/coreos/etcd/etcdserver/stats"
@@ -53,6 +56,11 @@ type Node struct {
 	httpServer *http.Server
 	waldir     string
 	wal        *wal.WAL
+
+	enableTLS bool
+	keyFile   string
+	certFile  string
+	caFile    string
 }
 
 // NewNode return a instance of node, the peers is a collection of
@@ -103,6 +111,14 @@ func (n *Node) SetSnapDirName(name string) {
 // SetWalDirName set the directory name that store write ahead log file
 func (n *Node) SetWalDirName(name string) {
 	n.waldir = name
+}
+
+// EnableTLSTransport make transport protected by TLS
+func (n *Node) EnableTLSTransport(keyFile string, certFile string, caFile string) {
+	n.keyFile = keyFile
+	n.certFile = certFile
+	n.caFile = caFile
+	n.enableTLS = true
 }
 
 // Start performs any initialization of the Server necessary for it to
@@ -215,9 +231,20 @@ func (n *Node) serveRaft() {
 	if err != nil {
 		log.Fatalf("casbin: Failed parsing URL (%v)", err)
 	}
-	ln, err := net.Listen("tcp", url.Host)
+
+	var ln net.Listener
+	if n.enableTLS {
+		cert, err := tls.LoadX509KeyPair(n.certFile, n.keyFile)
+		if err != nil {
+			log.Fatalf("casbin: Failed loading cert (%v)", err)
+		}
+		tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
+		ln, err = tls.Listen("tcp", url.Host, tlsConfig)
+	} else {
+		ln, err = net.Listen("tcp", url.Host)
+	}
 	if err != nil {
-		log.Fatalf("casbin: Failed listen (%v)", err)
+		log.Fatalf("casbin: Failed listening (%v)", err)
 	}
 	n.httpServer = &http.Server{Handler: n.transport.Handler()}
 	err = n.httpServer.Serve(ln)
@@ -275,6 +302,14 @@ func (n *Node) initTransport() error {
 		ErrorC:      make(chan error),
 	}
 
+	if n.enableTLS {
+		n.transport.TLSInfo = transport.TLSInfo{
+			KeyFile:        n.keyFile,
+			CertFile:       n.certFile,
+			TrustedCAFile:  n.caFile,
+			ClientCertAuth: true,
+		}
+	}
 	if err := n.transport.Start(); err != nil {
 		return err
 	}
