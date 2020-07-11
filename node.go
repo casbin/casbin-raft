@@ -3,6 +3,7 @@ package casbinraft
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/casbin/casbin/v2"
@@ -29,6 +31,7 @@ const defaultSnapshotCount uint64 = 10000
 // Node is a casbin enforcer backed by raft
 type Node struct {
 	id         uint64
+	isJoin     bool
 	ctx        context.Context
 	engine     *Engine
 	store      *raft.MemoryStorage
@@ -54,14 +57,19 @@ type Node struct {
 
 // NewNode return a instance of node, the peers is a collection of
 // id and url of all nodes in the cluster
-func NewNode(enforcer *casbin.SyncedEnforcer, id uint64, peers map[uint64]string) *Node {
+func NewNode(enforcer *casbin.SyncedEnforcer, id uint64, peers map[uint64]string, join ...bool) *Node {
+	isJoin := false
+	if len(join) > 0 {
+		isJoin = join[0]
+	}
 	store := raft.NewMemoryStorage()
 	membership := NewCluster(peers)
 	engine := newEngine(enforcer)
 	n := &Node{
-		id:    id,
-		ctx:   context.TODO(),
-		store: store,
+		id:     id,
+		ctx:    context.TODO(),
+		isJoin: isJoin,
+		store:  store,
 		cfg: &raft.Config{
 			ID:              id,
 			ElectionTick:    10,
@@ -118,7 +126,7 @@ func (n *Node) Restart() error {
 	n.snapshotter = snap.New(n.snapdir)
 	snapshot, err := n.snapshotter.Load()
 	if err != nil && err != snap.ErrNoSnapshot {
-		log.Fatalf("casbin: error loading snapshot (%v)", err)
+		return fmt.Errorf("casbin: error loading snapshot (%v)", err)
 	}
 
 	walsnap := walpb.Snapshot{}
@@ -126,29 +134,29 @@ func (n *Node) Restart() error {
 		walsnap.Index, walsnap.Term = snapshot.Metadata.Index, snapshot.Metadata.Term
 		n.store.ApplySnapshot(*snapshot)
 		if err := n.engine.recoverFromSnapshot(snapshot.Data); err != nil {
-			return fmt.Errorf("casbin: recover from snapshot fail: %s", err)
+			return fmt.Errorf("casbin: recover from snapshot fail (%s)", err)
 		}
 	}
 
 	n.wal, err = wal.Open(n.waldir, walsnap)
 	if err != nil {
-		log.Fatalf("casbin: error loading wal (%v)", err)
+		return fmt.Errorf("casbin: error loading wal (%v)", err)
 	}
 
 	_, st, ents, err := n.wal.ReadAll()
 	if err != nil {
-		log.Fatalf("casbin: Failed to read WAL (%v)", err)
+		return fmt.Errorf("casbin: failed to read WAL (%v)", err)
 	}
 
 	if err := n.store.SetHardState(st); err != nil {
-		return err
+		return fmt.Errorf("casbin: failed to save hard state (%v)", err)
 	}
 
 	n.store.Append(ents)
 	n.raft = raft.RestartNode(n.cfg)
 
 	if err := n.initTransport(); err != nil {
-		return err
+		return fmt.Errorf("casbin: failed to init transport (%v)", err)
 	}
 
 	go n.serveRaft()
@@ -167,30 +175,33 @@ func (n *Node) Stop() {
 // init initialize the resources required by the raft node
 func (n *Node) init() error {
 	if err := os.Mkdir(n.snapdir, 0750); err != nil {
-		return err
+		return fmt.Errorf("casbin: failed to create snapshot dir (%v)", err)
 	}
 
 	n.snapshotter = snap.New(n.snapdir)
 
 	err := os.Mkdir(n.waldir, 0750)
 	if err != nil {
-		return err
+		return fmt.Errorf("casbin: failed to create WAL dir (%v)", err)
 	}
 
 	n.wal, err = wal.Create(n.waldir, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("casbin: failed to create WAL (%v)", err)
 	}
 
 	var p []raft.Peer
-	for id, url := range n.membership.members {
-		p = append(p, raft.Peer{ID: id, Context: []byte(url)})
+	if !n.isJoin {
+		for id, url := range n.membership.members {
+			p = append(p, raft.Peer{ID: id, Context: []byte(url)})
+		}
 	}
+
 	n.raft = raft.StartNode(n.cfg, p)
 
 	snap, err := n.store.Snapshot()
 	if err != nil {
-		return err
+		return fmt.Errorf("casbin: failed to get snapshot from memorystore (%v)", err)
 	}
 	n.confState = &snap.Metadata.ConfState
 	n.snapshotIndex = snap.Metadata.Index
@@ -223,6 +234,12 @@ func (n *Node) run() error {
 		case rd := <-n.raft.Ready():
 			n.wal.Save(rd.HardState, rd.Entries)
 			n.saveToStorage(rd.HardState, rd.Entries, rd.Snapshot)
+			for _, m := range rd.Messages {
+				if !m.Reject {
+					continue
+				}
+				log.Printf("Message %d send to %d, reject %v", m.From, m.To, m.RejectHint)
+			}
 			n.transport.Send(rd.Messages)
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				err := n.processSnapshot(rd.Snapshot)
@@ -240,7 +257,7 @@ func (n *Node) run() error {
 			n.raft.Advance()
 		case err := <-n.transport.ErrorC:
 			if err != nil {
-				log.Printf("casbin: wrong raft transport: %s", err)
+				log.Printf("casbin: wrong raft transport (%s)", err)
 			}
 		case <-n.done:
 			return nil
@@ -334,7 +351,10 @@ func (n *Node) processSnapshot(snap raftpb.Snapshot) error {
 }
 
 func (n *Node) process(entry raftpb.Entry) {
-	log.Printf("Node %v: processing entry: %v\n", n.id, entry)
+	// log.Printf("Node %v: processing entry: %v\n", n.id, entry)
+	if n.raft.Status().Lead == n.id {
+		atomic.CompareAndSwapUint32(&n.engine.isLeader, 0, 1)
+	}
 	switch entry.Type {
 	case raftpb.EntryNormal:
 		if entry.Data != nil {
@@ -343,7 +363,6 @@ func (n *Node) process(entry raftpb.Entry) {
 			if err != nil {
 				panic(err)
 			}
-
 			n.engine.Apply(command)
 			n.appliedIndex = entry.Index
 		}
@@ -353,14 +372,16 @@ func (n *Node) process(entry raftpb.Entry) {
 		n.confState = n.raft.ApplyConfChange(cc)
 		n.membership.ApplyConfigChange(cc)
 		switch cc.Type {
-		case raftpb.ConfChangeAddNode:
+		case raftpb.ConfChangeAddNode, raftpb.ConfChangeAddLearnerNode:
 			if len(cc.Context) > 0 {
 				n.transport.AddPeer(types.ID(cc.NodeID), []string{string(cc.Context)})
 			}
+
 		case raftpb.ConfChangeRemoveNode:
 			if cc.NodeID == uint64(n.id) {
 				log.Println("have been removed from the cluster! Shutting down.")
 				n.Stop()
+				return
 			}
 			n.transport.RemovePeer(types.ID(cc.NodeID))
 		}
@@ -372,9 +393,16 @@ func (n *Node) process(entry raftpb.Entry) {
 func (n *Node) Process(ctx context.Context, m raftpb.Message) error {
 	return n.raft.Step(ctx, m)
 }
-func (n *Node) IsIDRemoved(id uint64) bool                           { return false }
-func (n *Node) ReportUnreachable(id uint64)                          {}
-func (n *Node) ReportSnapshot(id uint64, status raft.SnapshotStatus) {}
+
+func (n *Node) IsIDRemoved(id uint64) bool { return false }
+
+func (n *Node) ReportUnreachable(id uint64) {
+	n.raft.ReportUnreachable(id)
+}
+
+func (n *Node) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
+	n.raft.ReportSnapshot(id, status)
+}
 
 // AddMember add a new node to Cluster.
 func (n *Node) AddMember(id uint64, url string) error {
@@ -384,7 +412,7 @@ func (n *Node) AddMember(id uint64, url string) error {
 
 	cc := raftpb.ConfChange{
 		ID:      1,
-		Type:    raftpb.ConfChangeAddNode,
+		Type:    raftpb.ConfChangeAddLearnerNode,
 		NodeID:  id,
 		Context: []byte(url),
 	}
@@ -393,7 +421,7 @@ func (n *Node) AddMember(id uint64, url string) error {
 }
 
 // RemoveMember remove a exist Node from Cluster.
-func (n *Node) RemoveMember(id uint64, url string) error {
+func (n *Node) RemoveMember(id uint64) error {
 	if !n.membership.HasMember(id) {
 		return fmt.Errorf("the node %d don't exist in cluster", id)
 	}
@@ -408,13 +436,13 @@ func (n *Node) RemoveMember(id uint64, url string) error {
 
 // AddPolicy add a policy to casbin enforcer
 // This function is just used for testing.
-func (n *Node) AddPolicy(sec string, ptype string, rules []string) {
+func (n *Node) AddPolicy(sec string, ptype string, rules []string) error {
 	if n.engine.enforcer.GetModel().HasPolicy(sec, ptype, rules) {
-		return
+		return errors.New("casbin: policy already exists")
 	}
 
 	command := Command{
-		Op:    "add",
+		Op:    addCommand,
 		Sec:   sec,
 		Ptype: ptype,
 		Rule:  rules,
@@ -422,20 +450,20 @@ func (n *Node) AddPolicy(sec string, ptype string, rules []string) {
 
 	buf, err := json.Marshal(command)
 	if err != nil {
-		panic(err)
+		return err
 	}
-	n.raft.Propose(n.ctx, buf)
+	return n.raft.Propose(n.ctx, buf)
 }
 
 // RemovePolicy remove a policy from casbin enforcer
 // This function is just used for testing.
-func (n *Node) RemovePolicy(sec string, ptype string, rules []string) {
+func (n *Node) RemovePolicy(sec string, ptype string, rules []string) error {
 	if !n.engine.enforcer.GetModel().HasPolicy(sec, ptype, rules) {
-		return
+		return errors.New("casbin: policy does not exist")
 	}
 
 	command := Command{
-		Op:    "remove",
+		Op:    removeCommand,
 		Sec:   sec,
 		Ptype: ptype,
 		Rule:  rules,
@@ -443,7 +471,7 @@ func (n *Node) RemovePolicy(sec string, ptype string, rules []string) {
 
 	buf, err := json.Marshal(command)
 	if err != nil {
-		panic(err)
+		return err
 	}
-	n.raft.Propose(n.ctx, buf)
+	return n.raft.Propose(n.ctx, buf)
 }

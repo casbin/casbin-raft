@@ -2,24 +2,28 @@ package casbinraft
 
 import (
 	"encoding/json"
+	"errors"
+	"sync/atomic"
 
 	"github.com/casbin/casbin/v2"
 	"github.com/casbin/casbin/v2/model"
 )
 
 const (
+	addCommand     = 0
+	removeCommand  = 1
 	notImplemented = "not implemented"
 )
 
 // Engine is a wapper for casbin enforcer
 type Engine struct {
 	enforcer *casbin.SyncedEnforcer
-	isLeader bool
+	isLeader uint32
 }
 
 // Command represents an instruction to change the state of the engine
 type Command struct {
-	Op    string   `json:"op"`
+	Op    int      `json:"op"`
 	Sec   string   `json:"sec"`
 	Ptype string   `json:"ptype"`
 	Rule  []string `json:"rules"`
@@ -34,21 +38,23 @@ func newEngine(enforcer *casbin.SyncedEnforcer) *Engine {
 // Apply applies a Raft log entry to the casbin engine.
 func (e *Engine) Apply(c Command) {
 	switch c.Op {
-	case "add":
+	case addCommand:
 		_, err := e.applyAdd(c.Sec, c.Ptype, c.Rule)
 		if err != nil {
 			panic(err)
 		}
-	case "remove":
+	case removeCommand:
 		_, err := e.applyRemove(c.Sec, c.Ptype, c.Rule)
 		if err != nil {
 			panic(err)
 		}
+	default:
+		panic(errors.New("wrong command option"))
 	}
 }
 
 func (e *Engine) applyAdd(sec string, ptype string, rule []string) (bool, error) {
-	if e.isLeader && e.enforcer.GetAdapter() != nil {
+	if atomic.LoadUint32(&e.isLeader) == 1 && e.enforcer.GetAdapter() != nil {
 		if err := e.enforcer.GetAdapter().AddPolicy(sec, ptype, rule); err != nil {
 			if err.Error() != notImplemented {
 				return false, err
@@ -69,7 +75,7 @@ func (e *Engine) applyAdd(sec string, ptype string, rule []string) (bool, error)
 }
 
 func (e *Engine) applyRemove(sec string, ptype string, rule []string) (bool, error) {
-	if e.isLeader && e.enforcer.GetAdapter() != nil {
+	if atomic.LoadUint32(&e.isLeader) == 1 && e.enforcer.GetAdapter() != nil {
 		if err := e.enforcer.GetAdapter().RemovePolicy(sec, ptype, rule); err != nil {
 			if err.Error() != notImplemented {
 				return false, err

@@ -1,12 +1,9 @@
 package casbinraft
 
 import (
-	"errors"
 	"sync"
 
 	"github.com/coreos/etcd/raft/raftpb"
-
-	"github.com/coreos/etcd/raft"
 )
 
 // Cluster manage the node id and url
@@ -20,21 +17,6 @@ func NewCluster(peers map[uint64]string) *Cluster {
 	return &Cluster{
 		members: peers,
 	}
-}
-
-// NewClusterFromPeers create a Cluster from raft Peer
-func NewClusterFromPeers(peers []raft.Peer) (*Cluster, error) {
-	c := &Cluster{
-		members: make(map[uint64]string),
-	}
-	for _, p := range peers {
-		if _, ok := c.members[p.ID]; ok {
-			return nil, errors.New("error: can't contian the same ID in a cluster")
-		}
-		c.members[p.ID] = string(p.Context)
-	}
-
-	return c, nil
 }
 
 // GetURL find the url
