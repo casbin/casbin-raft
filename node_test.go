@@ -128,7 +128,7 @@ func TestModifyRBACPolicy(t *testing.T) {
 	peers[1] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
 	enforcer, err := casbin.NewSyncedEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	node := NewNode(enforcer, 1, peers)
 	go node.Start()
@@ -154,7 +154,7 @@ func TestAddMember(t *testing.T) {
 		os.RemoveAll(fmt.Sprintf("casbin-%d-snap", id))
 		enforcer, err := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 		if err != nil {
-			panic(err)
+			t.Fatal(err)
 		}
 		n := NewNode(enforcer, id, peers)
 		go n.Start()
@@ -223,7 +223,7 @@ func TestAddMemberRunning(t *testing.T) {
 		os.RemoveAll(fmt.Sprintf("casbin-%d-snap", id))
 		enforcer, err := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 		if err != nil {
-			panic(err)
+			t.Fatal(err)
 		}
 		n := NewNode(enforcer, id, peers)
 		go n.Start()
@@ -284,7 +284,7 @@ func TestRestartFromWAL(t *testing.T) {
 	peers[1] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
 	enforcer, err := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	noderestart := NewNode(enforcer, 1, peers)
 	go noderestart.Restart()
@@ -300,7 +300,7 @@ func TestRestartFromLockedWAL(t *testing.T) {
 	peers[1] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
 	enforcer, err := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	noderestart := NewNode(enforcer, 1, peers)
 	err = noderestart.Restart()
@@ -326,7 +326,7 @@ func TestRestartFromSnapshot(t *testing.T) {
 	peers[1] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
 	enforcer, err := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	noderestart := NewNode(enforcer, 1, peers)
 	go noderestart.Restart()

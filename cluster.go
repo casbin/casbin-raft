@@ -51,9 +51,9 @@ func (c *Cluster) HasMember(id uint64) bool {
 // ApplyConfigChange apply the Ready ConfChange Message
 func (c *Cluster) ApplyConfigChange(cc raftpb.ConfChange) {
 	switch cc.Type {
-	case raftpb.ConfChangeAddNode:
+	case raftpb.ConfChangeAddNode, raftpb.ConfChangeAddLearnerNode:
 		c.AddMember(cc.NodeID, string(cc.Context))
 	case raftpb.ConfChangeRemoveNode:
-		c.RemoveMember(cc.ID)
+		c.RemoveMember(cc.NodeID)
 	}
 }

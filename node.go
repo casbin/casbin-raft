@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -16,10 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/coreos/etcd/pkg/transport"
-
 	"github.com/casbin/casbin/v2"
+
 	"github.com/coreos/etcd/etcdserver/stats"
+	"github.com/coreos/etcd/pkg/transport"
 	"github.com/coreos/etcd/pkg/types"
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
@@ -27,9 +26,14 @@ import (
 	"github.com/coreos/etcd/snap"
 	"github.com/coreos/etcd/wal"
 	"github.com/coreos/etcd/wal/walpb"
+	"github.com/pkg/errors"
 )
 
-const defaultSnapshotCount uint64 = 10000
+const (
+	defaultSnapshotCount uint64 = 10000
+	defaultHeartBeatTick        = 1
+	defaultElectionTick         = 10
+)
 
 // Node is a casbin enforcer backed by raft
 type Node struct {
@@ -68,6 +72,7 @@ type Node struct {
 func NewNode(enforcer *casbin.SyncedEnforcer, id uint64, peers map[uint64]string, join ...bool) *Node {
 	isJoin := false
 	if len(join) > 0 {
+		// the join parameter takes only the first to ignore the rest
 		isJoin = join[0]
 	}
 	store := raft.NewMemoryStorage()
@@ -80,8 +85,8 @@ func NewNode(enforcer *casbin.SyncedEnforcer, id uint64, peers map[uint64]string
 		store:  store,
 		cfg: &raft.Config{
 			ID:              id,
-			ElectionTick:    10,
-			HeartbeatTick:   1,
+			ElectionTick:    defaultElectionTick,
+			HeartbeatTick:   defaultHeartBeatTick,
 			Storage:         store,
 			MaxSizePerMsg:   math.MaxUint16,
 			MaxInflightMsgs: 256,
@@ -113,6 +118,21 @@ func (n *Node) SetWalDirName(name string) {
 	n.waldir = name
 }
 
+// SetHeartbeatTick set the number of Node.Tick invocations that must pass between
+// heartbeats. That is, a leader sends heartbeat messages to maintain its
+// leadership every HeartbeatTick ticks.
+func (n *Node) SetHeartbeatTick(num int) {
+	n.cfg.HeartbeatTick = num
+}
+
+// SetElectionTick set the number of Node.Tick invocations that must pass between
+// elections. ElectionTick must be greater than HeartbeatTick.
+// We suggest ElectionTick = 10 * HeartbeatTick to avoid
+// unnecessary leader switching.
+func (n *Node) SetElectionTick(num int) {
+	n.cfg.ElectionTick = num
+}
+
 // EnableTLSTransport make transport protected by TLS
 func (n *Node) EnableTLSTransport(keyFile string, certFile string, caFile string) {
 	n.keyFile = keyFile
@@ -142,37 +162,43 @@ func (n *Node) Restart() error {
 	n.snapshotter = snap.New(n.snapdir)
 	snapshot, err := n.snapshotter.Load()
 	if err != nil && err != snap.ErrNoSnapshot {
-		return fmt.Errorf("casbin: error loading snapshot (%v)", err)
+		return errors.Wrap(err, "Failed loading snapshot")
 	}
 
 	walsnap := walpb.Snapshot{}
 	if snapshot != nil {
 		walsnap.Index, walsnap.Term = snapshot.Metadata.Index, snapshot.Metadata.Term
-		n.store.ApplySnapshot(*snapshot)
+
+		if err := n.store.ApplySnapshot(*snapshot); err != nil {
+			return errors.Wrap(err, "Save snapshot to store fail")
+		}
+
 		if err := n.engine.recoverFromSnapshot(snapshot.Data); err != nil {
-			return fmt.Errorf("casbin: recover from snapshot fail (%s)", err)
+			return errors.Wrap(err, "Recover from snapshot fail")
 		}
 	}
 
 	n.wal, err = wal.Open(n.waldir, walsnap)
 	if err != nil {
-		return fmt.Errorf("casbin: error loading wal (%v)", err)
+		return errors.Wrap(err, "Failed loading wal")
 	}
 
 	_, st, ents, err := n.wal.ReadAll()
 	if err != nil {
-		return fmt.Errorf("casbin: failed to read WAL (%v)", err)
+		return errors.Wrap(err, "Failed reading WAL")
 	}
 
 	if err := n.store.SetHardState(st); err != nil {
-		return fmt.Errorf("casbin: failed to save hard state (%v)", err)
+		return errors.Wrap(err, "Failed saving hard state")
 	}
 
-	n.store.Append(ents)
+	if err := n.store.Append(ents); err != nil {
+		return errors.Wrap(err, "Failed saving log")
+	}
 	n.raft = raft.RestartNode(n.cfg)
 
 	if err := n.initTransport(); err != nil {
-		return fmt.Errorf("casbin: failed to init transport (%v)", err)
+		return errors.Wrap(err, "Failed init transport")
 	}
 
 	go n.serveRaft()
@@ -191,22 +217,23 @@ func (n *Node) Stop() {
 // init initialize the resources required by the raft node
 func (n *Node) init() error {
 	if err := os.Mkdir(n.snapdir, 0750); err != nil {
-		return fmt.Errorf("casbin: failed to create snapshot dir (%v)", err)
+		return errors.Wrap(err, "Failed creating snapshot dir")
 	}
 
 	n.snapshotter = snap.New(n.snapdir)
 
 	err := os.Mkdir(n.waldir, 0750)
 	if err != nil {
-		return fmt.Errorf("casbin: failed to create WAL dir (%v)", err)
+		return errors.Wrap(err, "Failed creating WAL dir")
 	}
 
 	n.wal, err = wal.Create(n.waldir, nil)
 	if err != nil {
-		return fmt.Errorf("casbin: failed to create WAL (%v)", err)
+		return errors.Wrap(err, "Failed creating WAL")
 	}
 
 	var p []raft.Peer
+	// If the node needs to join the cluster, the peers passed in StartNode should be empty.
 	if !n.isJoin {
 		for id, url := range n.membership.members {
 			p = append(p, raft.Peer{ID: id, Context: []byte(url)})
@@ -217,7 +244,7 @@ func (n *Node) init() error {
 
 	snap, err := n.store.Snapshot()
 	if err != nil {
-		return fmt.Errorf("casbin: failed to get snapshot from memorystore (%v)", err)
+		return errors.Wrap(err, "Failed getting snapshot from memorystore")
 	}
 	n.confState = &snap.Metadata.ConfState
 	n.snapshotIndex = snap.Metadata.Index
@@ -229,14 +256,14 @@ func (n *Node) init() error {
 func (n *Node) serveRaft() {
 	url, err := url.Parse(n.membership.GetURL(n.id))
 	if err != nil {
-		log.Fatalf("casbin: Failed parsing URL (%v)", err)
+		log.Fatalf("Failed parsing URL (%v)", err)
 	}
 
 	var ln net.Listener
 	if n.enableTLS {
 		cert, err := tls.LoadX509KeyPair(n.certFile, n.keyFile)
 		if err != nil {
-			log.Fatalf("casbin: Failed loading cert (%v)", err)
+			log.Fatalf("Failed loading cert (%v)", err)
 		}
 		tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
 		ln, err = tls.Listen("tcp", url.Host, tlsConfig)
@@ -244,12 +271,12 @@ func (n *Node) serveRaft() {
 		ln, err = net.Listen("tcp", url.Host)
 	}
 	if err != nil {
-		log.Fatalf("casbin: Failed listening (%v)", err)
+		log.Fatalf("Failed listening (%v)", err)
 	}
 	n.httpServer = &http.Server{Handler: n.transport.Handler()}
 	err = n.httpServer.Serve(ln)
 	if err != nil && err != http.ErrServerClosed {
-		log.Fatalf("casbin: http server close (%v)", err)
+		log.Fatalf("Http server close (%v)", err)
 	}
 }
 
@@ -261,17 +288,12 @@ func (n *Node) run() error {
 		case rd := <-n.raft.Ready():
 			n.wal.Save(rd.HardState, rd.Entries)
 			n.saveToStorage(rd.HardState, rd.Entries, rd.Snapshot)
-			for _, m := range rd.Messages {
-				if !m.Reject {
-					continue
-				}
-				log.Printf("Message %d send to %d, reject %v", m.From, m.To, m.RejectHint)
-			}
 			n.transport.Send(rd.Messages)
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				err := n.processSnapshot(rd.Snapshot)
 				if err != nil {
-					log.Printf("casbin: failed save snapshot (%v)", err)
+					// runtime errors are only printed to the log, as are the following
+					log.Printf("Failed saving snapshot (%v)", err)
 				}
 			}
 			for _, entry := range rd.CommittedEntries {
@@ -284,7 +306,7 @@ func (n *Node) run() error {
 			n.raft.Advance()
 		case err := <-n.transport.ErrorC:
 			if err != nil {
-				log.Printf("casbin: wrong raft transport (%s)", err)
+				log.Printf("Wrong raft transport (%s)", err)
 			}
 		case <-n.done:
 			return nil
@@ -326,16 +348,16 @@ func (n *Node) initTransport() error {
 func (n *Node) triggerSnapshot() {
 	data, err := n.engine.getSnapshot()
 	if err != nil {
-		log.Printf("casbin: fail get snapshot data (%v)", err)
+		log.Printf("Failed getting snapshot data (%v)", err)
 	}
 
 	snap, err := n.store.CreateSnapshot(n.appliedIndex, n.confState, data)
 	if err != nil {
-		log.Printf("casbin: can't create snapshot from memory store (%v)", err)
+		log.Printf("Can't create snapshot from memory store (%v)", err)
 	}
 
 	if err := n.snapshotter.SaveSnap(snap); err != nil {
-		log.Printf("casbin: fail save snapshot (%v)", err)
+		log.Printf("Failed saving snapshot (%v)", err)
 	}
 
 	n.snapshotIndex = n.appliedIndex
@@ -345,14 +367,19 @@ func (n *Node) saveToStorage(hardState raftpb.HardState, entries []raftpb.Entry,
 	n.store.Append(entries)
 
 	if !raft.IsEmptyHardState(hardState) {
-		n.store.SetHardState(hardState)
+		if err := n.store.SetHardState(hardState); err != nil {
+			log.Printf("Failed storing hardstate (%v)", err)
+		}
 	}
 
 	if !raft.IsEmptySnap(snapshot) {
-		n.store.ApplySnapshot(snapshot)
+		if err := n.store.ApplySnapshot(snapshot); err != nil {
+			log.Printf("Failed storing snapshot (%v)", err)
+		}
 	}
 }
 
+// processSnapshot will
 func (n *Node) processSnapshot(snap raftpb.Snapshot) error {
 	walSnap := walpb.Snapshot{
 		Index: snap.Metadata.Index,
@@ -386,7 +413,7 @@ func (n *Node) processSnapshot(snap raftpb.Snapshot) error {
 }
 
 func (n *Node) process(entry raftpb.Entry) {
-	// log.Printf("Node %v: processing entry: %v\n", n.id, entry)
+	// set the leader state, determine if need to apply in adapter
 	if n.raft.Status().Lead == n.id {
 		atomic.CompareAndSwapUint32(&n.engine.isLeader, 0, 1)
 	}
@@ -396,6 +423,7 @@ func (n *Node) process(entry raftpb.Entry) {
 			var command Command
 			err := json.Unmarshal(entry.Data, &command)
 			if err != nil {
+				// need a way to notify the caller, panic temporarily
 				panic(err)
 			}
 			n.engine.Apply(command)
@@ -403,7 +431,9 @@ func (n *Node) process(entry raftpb.Entry) {
 		}
 	case raftpb.EntryConfChange:
 		var cc raftpb.ConfChange
-		cc.Unmarshal(entry.Data)
+		if err := cc.Unmarshal(entry.Data); err != nil {
+			log.Printf("Failed unmarshal confchange data (%v)", err)
+		}
 		n.confState = n.raft.ApplyConfChange(cc)
 		n.membership.ApplyConfigChange(cc)
 		switch cc.Type {
@@ -429,7 +459,9 @@ func (n *Node) Process(ctx context.Context, m raftpb.Message) error {
 	return n.raft.Step(ctx, m)
 }
 
-func (n *Node) IsIDRemoved(id uint64) bool { return false }
+func (n *Node) IsIDRemoved(id uint64) bool {
+	return !n.membership.HasMember(id)
+}
 
 func (n *Node) ReportUnreachable(id uint64) {
 	n.raft.ReportUnreachable(id)
@@ -447,7 +479,7 @@ func (n *Node) AddMember(id uint64, url string) error {
 
 	cc := raftpb.ConfChange{
 		ID:      1,
-		Type:    raftpb.ConfChangeAddLearnerNode,
+		Type:    raftpb.ConfChangeAddNode,
 		NodeID:  id,
 		Context: []byte(url),
 	}
@@ -473,7 +505,7 @@ func (n *Node) RemoveMember(id uint64) error {
 // This function is just used for testing.
 func (n *Node) AddPolicy(sec string, ptype string, rules []string) error {
 	if n.engine.enforcer.GetModel().HasPolicy(sec, ptype, rules) {
-		return errors.New("casbin: policy already exists")
+		return errors.New("policy already exists")
 	}
 
 	command := Command{
@@ -494,7 +526,7 @@ func (n *Node) AddPolicy(sec string, ptype string, rules []string) error {
 // This function is just used for testing.
 func (n *Node) RemovePolicy(sec string, ptype string, rules []string) error {
 	if !n.engine.enforcer.GetModel().HasPolicy(sec, ptype, rules) {
-		return errors.New("casbin: policy does not exist")
+		return errors.New("policy does not exist")
 	}
 
 	command := Command{

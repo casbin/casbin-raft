@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	addCommand     = 0
-	removeCommand  = 1
-	notImplemented = "not implemented"
+	addCommand    = 0
+	removeCommand = 1
 )
+
+const notImplemented = "not implemented"
 
 // Engine is a wapper for casbin enforcer
 type Engine struct {
@@ -41,6 +42,7 @@ func (e *Engine) Apply(c Command) {
 	case addCommand:
 		_, err := e.applyAdd(c.Sec, c.Ptype, c.Rule)
 		if err != nil {
+			// need a way to notify the caller, panic temporarily, the same as following
 			panic(err)
 		}
 	case removeCommand:
