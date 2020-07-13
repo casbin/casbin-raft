@@ -69,29 +69,6 @@ func newCluster(num int) cluster {
 	return c
 }
 
-func newTLSCluster(num int) cluster {
-	peers := make(map[uint64]string)
-
-	for i := 1; i <= num; i++ {
-		peers[uint64(i)] = fmt.Sprintf("https://127.0.0.1:%d", GetFreePort())
-	}
-	var c cluster
-	for id := range peers {
-		os.RemoveAll(fmt.Sprintf("casbin-%d", id))
-		os.RemoveAll(fmt.Sprintf("casbin-%d-snap", id))
-		enforcer, err := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
-		if err != nil {
-			panic(err)
-		}
-		n := NewNode(enforcer, id, peers)
-		n.EnableTLSTransport("integration/server.key.insecure", "integration/server.crt", "integration/ca.crt")
-
-		go n.Start()
-		c = append(c, n)
-	}
-	return c
-}
-
 func TestModifyPolicy(t *testing.T) {
 	node := newNode(1)
 	<-time.After(time.Second * 3)
@@ -353,19 +330,4 @@ func TestRequestToRemovedMember(t *testing.T) {
 			break
 		}
 	}
-}
-
-func TestTLSTransport(t *testing.T) {
-	c := newTLSCluster(3)
-	<-time.After(time.Second * 3)
-	c[0].AddPolicy("p", "p", []string{"alice", "data2", "write"})
-	c[1].RemovePolicy("p", "p", []string{"alice", "data1", "read"})
-	c[2].RemovePolicy("p", "p", []string{"bob", "data2", "write"})
-	c[2].AddPolicy("p", "p", []string{"eve", "data3", "read"})
-	<-time.After(time.Second * 3)
-
-	testClusterEnforce(t, c, "alice", "data2", "write", true)
-	testClusterEnforce(t, c, "alice", "data1", "read", false)
-	testClusterEnforce(t, c, "bob", "data2", "write", false)
-	testClusterEnforce(t, c, "eve", "data3", "read", true)
 }
