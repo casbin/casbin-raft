@@ -1,12 +1,16 @@
 package casbinraft
 
 import (
-	"encoding/json"
+	"bufio"
+	"bytes"
 	"errors"
+	"strings"
 	"sync/atomic"
 
 	"github.com/casbin/casbin/v2"
 	"github.com/casbin/casbin/v2/model"
+	"github.com/casbin/casbin/v2/persist"
+	"github.com/casbin/casbin/v2/util"
 )
 
 const (
@@ -56,6 +60,10 @@ func (e *Engine) Apply(c Command) {
 }
 
 func (e *Engine) applyAdd(sec string, ptype string, rule []string) (bool, error) {
+	if e.enforcer.GetModel().HasPolicy(sec, ptype, rule) {
+		return false, nil
+	}
+
 	if atomic.LoadUint32(&e.isLeader) == 1 && e.enforcer.GetAdapter() != nil {
 		if err := e.enforcer.GetAdapter().AddPolicy(sec, ptype, rule); err != nil {
 			if err.Error() != notImplemented {
@@ -77,6 +85,10 @@ func (e *Engine) applyAdd(sec string, ptype string, rule []string) (bool, error)
 }
 
 func (e *Engine) applyRemove(sec string, ptype string, rule []string) (bool, error) {
+	if !e.enforcer.GetModel().HasPolicy(sec, ptype, rule) {
+		return false, nil
+	}
+
 	if atomic.LoadUint32(&e.isLeader) == 1 && e.enforcer.GetAdapter() != nil {
 		if err := e.enforcer.GetAdapter().RemovePolicy(sec, ptype, rule); err != nil {
 			if err.Error() != notImplemented {
@@ -102,15 +114,35 @@ func (e *Engine) applyRemove(sec string, ptype string, rule []string) (bool, err
 
 // getSnapshot convert model data to snapshot
 func (e *Engine) getSnapshot() ([]byte, error) {
-	return json.Marshal(e.enforcer.GetModel())
+	var tmp bytes.Buffer
+	model := e.enforcer.GetModel()
+	for ptype, ast := range model["p"] {
+		for _, rule := range ast.Policy {
+			tmp.WriteString(ptype + ", ")
+			tmp.WriteString(util.ArrayToString(rule))
+			tmp.WriteString("\n")
+		}
+	}
+
+	for ptype, ast := range model["g"] {
+		for _, rule := range ast.Policy {
+			tmp.WriteString(ptype + ", ")
+			tmp.WriteString(util.ArrayToString(rule))
+			tmp.WriteString("\n")
+		}
+	}
+
+	return bytes.TrimRight(tmp.Bytes(), "\n"), nil
 }
 
 // recoverFromSnapshot save the snapshot data to model
 func (e *Engine) recoverFromSnapshot(snapshot []byte) error {
-	var model model.Model
-	if err := json.Unmarshal(snapshot, &model); err != nil {
-		return err
+	e.enforcer.ClearPolicy()
+	model := e.enforcer.GetModel()
+	scanner := bufio.NewScanner(bytes.NewReader(snapshot))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		persist.LoadPolicyLine(line, model)
 	}
-	e.enforcer.SetModel(model)
-	return nil
+	return scanner.Err()
 }
