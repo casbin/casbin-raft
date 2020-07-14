@@ -103,17 +103,20 @@ func NewNode(enforcer *casbin.SyncedEnforcer, id uint64, peers map[uint64]string
 	return n
 }
 
-// SetSnapshotCount set the number of logs that trigger a snapshot save
+// SetSnapshotCount set the number of logs that trigger a snapshot save.
+// This function must be called before call node.Start().
 func (n *Node) SetSnapshotCount(count uint64) {
 	n.snapCount = count
 }
 
-// SetSnapDirName set the directory name that store sanpshot file
+// SetSnapDirName set the directory name that store sanpshot file.
+// This function must be called before call node.Start().
 func (n *Node) SetSnapDirName(name string) {
 	n.snapdir = name
 }
 
-// SetWalDirName set the directory name that store write ahead log file
+// SetWalDirName set the directory name that store write ahead log file.
+// This function must be called before call node.Start().
 func (n *Node) SetWalDirName(name string) {
 	n.waldir = name
 }
@@ -121,6 +124,7 @@ func (n *Node) SetWalDirName(name string) {
 // SetHeartbeatTick set the number of Node.Tick invocations that must pass between
 // heartbeats. That is, a leader sends heartbeat messages to maintain its
 // leadership every HeartbeatTick ticks.
+// This function must be called before call node.Start().
 func (n *Node) SetHeartbeatTick(num int) {
 	n.cfg.HeartbeatTick = num
 }
@@ -129,11 +133,13 @@ func (n *Node) SetHeartbeatTick(num int) {
 // elections. ElectionTick must be greater than HeartbeatTick.
 // We suggest ElectionTick = 10 * HeartbeatTick to avoid
 // unnecessary leader switching.
+// This function must be called before call node.Start().
 func (n *Node) SetElectionTick(num int) {
 	n.cfg.ElectionTick = num
 }
 
-// EnableTLSTransport make transport protected by TLS
+// EnableTLSTransport make transport protected by TLS.
+// This function must be called before call node.Start().
 func (n *Node) EnableTLSTransport(keyFile string, certFile string, caFile string) {
 	n.keyFile = keyFile
 	n.certFile = certFile

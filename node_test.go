@@ -1,13 +1,17 @@
 package casbinraft
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/casbin/casbin/v2"
+	"github.com/coreos/etcd/pkg/pbutil"
+	"github.com/coreos/etcd/raft/raftpb"
 )
 
 type cluster []*Node
@@ -313,6 +317,21 @@ func TestRestartFromSnapshot(t *testing.T) {
 	}
 }
 
+func TestRestartFromEmpty(t *testing.T) {
+	os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
+	os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
+	enforcer, err := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := NewNode(enforcer, 1, nil)
+	err = n.Restart()
+	t.Log(err)
+	if err == nil {
+		t.Error("expect err, get nil")
+	}
+}
+
 func TestRequestToRemovedMember(t *testing.T) {
 	c := newCluster(3)
 	<-time.After(time.Second * 3)
@@ -329,5 +348,268 @@ func TestRequestToRemovedMember(t *testing.T) {
 			}
 			break
 		}
+	}
+}
+
+func TestInitNode(t *testing.T) {
+	var n *Node
+	tests := []struct {
+		beforeFunc func()
+		hasErr     bool
+	}{
+		{
+			func() {
+				os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
+				os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
+			},
+			false,
+		},
+		{
+			func() {
+				os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
+			},
+			true,
+		},
+		{
+			func() {
+				os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
+				os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
+			},
+			false,
+		},
+		{
+			func() {
+				os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
+			},
+			true,
+		},
+		{
+			func() {},
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		enforcer, err := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+		if err != nil {
+			t.Fatal(err)
+		}
+		n = NewNode(enforcer, 1, nil)
+		tt.beforeFunc()
+		err = n.init()
+		if ok := err != nil; ok != tt.hasErr {
+			t.Errorf("get err %s", err)
+		}
+	}
+}
+
+func TestRestartNode(t *testing.T) {
+	tests := []struct {
+		beforeFunc func()
+		hasErr     bool
+	}{
+		{
+			func() {
+				os.Mkdir(fmt.Sprintf("casbin-%d", 1), 0750)
+				os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
+			},
+			true,
+		},
+		{
+			func() {
+				os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
+				os.Mkdir(fmt.Sprintf("casbin-%d-snap", 1), 0750)
+			},
+			true,
+		},
+		{
+			func() {
+				os.Mkdir(fmt.Sprintf("casbin-%d", 1), 0750)
+				os.Mkdir(fmt.Sprintf("casbin-%d-snap", 1), 0750)
+			},
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		enforcer, err := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := NewNode(enforcer, 1, nil)
+		tt.beforeFunc()
+		err = n.Restart()
+		t.Log(err)
+
+		if ok := err != nil; ok != tt.hasErr {
+			t.Errorf("get err: %s", err)
+		}
+	}
+}
+
+func TestProcessNormal(t *testing.T) {
+	os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
+	os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
+	enforcer, err := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := NewNode(enforcer, 1, nil)
+	err = n.init()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command1 := Command{
+		Op:    addCommand,
+		Sec:   "p",
+		Ptype: "p",
+		Rule:  []string{"eve", "data3", "read"},
+	}
+	data1, err := json.Marshal(&command1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command2 := Command{
+		Op:    removeCommand,
+		Sec:   "p",
+		Ptype: "p",
+		Rule:  []string{"eve", "data3", "read"},
+	}
+	data2, err := json.Marshal(&command2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		entry raftpb.Entry
+		res   bool
+	}{
+		{
+			raftpb.Entry{Term: 1, Index: 2, Type: raftpb.EntryNormal, Data: data1},
+			true,
+		},
+		{
+			raftpb.Entry{Term: 1, Index: 2, Type: raftpb.EntryNormal, Data: data1},
+			true,
+		},
+		{
+			raftpb.Entry{Term: 1, Index: 3, Type: raftpb.EntryNormal, Data: data2},
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		n.process(tt.entry)
+		testEnforce(t, n, "eve", "data3", "read", tt.res)
+	}
+}
+
+func TestProcessConfchange(t *testing.T) {
+	os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
+	os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
+	enforcer, err := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peers := make(map[uint64]string)
+	n := NewNode(enforcer, 1, peers)
+	err = n.init()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = n.initTransport()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	addcc1 := &raftpb.ConfChange{Type: raftpb.ConfChangeAddNode, NodeID: 1, Context: []byte("http://127.0.0.1:8081")}
+	addcc2 := &raftpb.ConfChange{Type: raftpb.ConfChangeAddNode, NodeID: 2, Context: []byte("http://127.0.0.1:8082")}
+	addcc3 := &raftpb.ConfChange{Type: raftpb.ConfChangeAddNode, NodeID: 3, Context: []byte("http://127.0.0.1:8083")}
+	removecc2 := &raftpb.ConfChange{Type: raftpb.ConfChangeRemoveNode, NodeID: 2}
+	removecc3 := &raftpb.ConfChange{Type: raftpb.ConfChangeRemoveNode, NodeID: 3}
+	tests := []struct {
+		entry raftpb.Entry
+		state raftpb.ConfState
+	}{
+		{
+			raftpb.Entry{Term: 1, Index: 2, Type: raftpb.EntryConfChange, Data: pbutil.MustMarshal(addcc1)},
+			raftpb.ConfState{Nodes: []uint64{1}},
+		},
+		{
+			raftpb.Entry{Term: 2, Index: 3, Type: raftpb.EntryConfChange, Data: pbutil.MustMarshal(addcc2)},
+			raftpb.ConfState{Nodes: []uint64{1, 2}},
+		},
+		{
+			raftpb.Entry{Term: 2, Index: 3, Type: raftpb.EntryConfChange, Data: pbutil.MustMarshal(addcc3)},
+			raftpb.ConfState{Nodes: []uint64{1, 2, 3}},
+		},
+		{
+			raftpb.Entry{Term: 2, Index: 4, Type: raftpb.EntryConfChange, Data: pbutil.MustMarshal(removecc2)},
+			raftpb.ConfState{Nodes: []uint64{1, 3}},
+		},
+		{
+			raftpb.Entry{Term: 2, Index: 3, Type: raftpb.EntryConfChange, Data: pbutil.MustMarshal(removecc3)},
+			raftpb.ConfState{Nodes: []uint64{1}},
+		},
+	}
+
+	for _, tt := range tests {
+		n.process(tt.entry)
+		if !reflect.DeepEqual(&tt.state, n.confState) {
+			t.Errorf("confState %v \n want %v", n.confState, tt.state)
+		}
+	}
+
+}
+
+func TestProcessSnapshot(t *testing.T) {
+	os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
+	os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
+	enforcer, err := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := NewNode(enforcer, 1, nil)
+	n.init()
+	data1, err := n.engine.getSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enforcer.AddPolicy("eve", "data3", "write")
+	data2, err := n.engine.getSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enforcer.RemovePolicy("bob", "data2", "write")
+	data3, err := n.engine.getSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		snapshot raftpb.Snapshot
+		res      [][]string
+	}{
+		{
+			raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 1000, Term: 1}, Data: data1},
+			[][]string{{"alice", "data1", "read"}, {"bob", "data2", "write"}},
+		},
+		{
+			raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 1001, Term: 1}, Data: data2},
+			[][]string{{"alice", "data1", "read"}, {"bob", "data2", "write"}, {"eve", "data3", "write"}},
+		},
+		{
+			raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 1002, Term: 1}, Data: data3},
+			[][]string{{"alice", "data1", "read"}, {"eve", "data3", "write"}},
+		},
+	}
+
+	for _, tt := range tests {
+		err = n.processSnapshot(tt.snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testGetPolicy(t, n.engine, tt.res)
 	}
 }
