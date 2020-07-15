@@ -87,7 +87,7 @@ func TestEngineApplyPolicy(t *testing.T) {
 				Op:    removeCommand,
 				Sec:   "p",
 				Ptype: "p",
-				Rule:  []string{"alice", "data1", "read"},
+				Rules: [][]string{{"alice", "data1", "read"}},
 			},
 			[][]string{
 				{"bob", "data2", "write"},
@@ -100,7 +100,7 @@ func TestEngineApplyPolicy(t *testing.T) {
 				Op:    removeCommand,
 				Sec:   "p",
 				Ptype: "p",
-				Rule:  []string{"bob", "data2", "write"},
+				Rules: [][]string{{"bob", "data2", "write"}},
 			},
 			[][]string{
 				{"data2_admin", "data2", "read"},
@@ -112,7 +112,7 @@ func TestEngineApplyPolicy(t *testing.T) {
 				Op:    removeCommand,
 				Sec:   "p",
 				Ptype: "p",
-				Rule:  []string{"alice", "data1", "read"},
+				Rules: [][]string{{"alice", "data1", "read"}},
 			},
 			[][]string{
 				{"data2_admin", "data2", "read"},
@@ -124,7 +124,7 @@ func TestEngineApplyPolicy(t *testing.T) {
 				Op:    addCommand,
 				Sec:   "p",
 				Ptype: "p",
-				Rule:  []string{"eve", "data3", "read"},
+				Rules: [][]string{{"eve", "data3", "read"}},
 			},
 			[][]string{
 				{"data2_admin", "data2", "read"},
@@ -137,12 +137,53 @@ func TestEngineApplyPolicy(t *testing.T) {
 				Op:    addCommand,
 				Sec:   "p",
 				Ptype: "p",
-				Rule:  []string{"eve", "data3", "read"},
+				Rules: [][]string{{"eve", "data3", "read"}},
 			},
 			[][]string{
 				{"data2_admin", "data2", "read"},
 				{"data2_admin", "data2", "write"},
 				{"eve", "data3", "read"},
+			},
+		},
+
+		{
+			Command{
+				Op:    addCommand,
+				Sec:   "p",
+				Ptype: "p",
+				Rules: [][]string{
+					{"jack", "data4", "read"},
+					{"katy", "data4", "write"},
+					{"leyo", "data4", "read"},
+					{"ham", "data4", "write"},
+				},
+			},
+			[][]string{
+				{"data2_admin", "data2", "read"},
+				{"data2_admin", "data2", "write"},
+				{"eve", "data3", "read"},
+				{"jack", "data4", "read"},
+				{"katy", "data4", "write"},
+				{"leyo", "data4", "read"},
+				{"ham", "data4", "write"},
+			},
+		},
+		{
+			Command{
+				Op:    removeCommand,
+				Sec:   "p",
+				Ptype: "p",
+				Rules: [][]string{
+					{"jack", "data4", "read"},
+					{"katy", "data4", "write"},
+				},
+			},
+			[][]string{
+				{"data2_admin", "data2", "read"},
+				{"data2_admin", "data2", "write"},
+				{"eve", "data3", "read"},
+				{"leyo", "data4", "read"},
+				{"ham", "data4", "write"},
 			},
 		},
 	}
@@ -166,21 +207,21 @@ func TestEngineApplyGroupPolicy(t *testing.T) {
 			Op:    removeCommand,
 			Sec:   "g",
 			Ptype: "g",
-			Rule:  []string{"alice", "data2_admin"},
+			Rules: [][]string{{"alice", "data2_admin"}},
 		},
 		{
 
 			Op:    addCommand,
 			Sec:   "g",
 			Ptype: "g",
-			Rule:  []string{"bob", "data1_admin"},
+			Rules: [][]string{{"bob", "data1_admin"}},
 		},
 		{
 
 			Op:    addCommand,
 			Sec:   "g",
 			Ptype: "g",
-			Rule:  []string{"eve", "data3_admin"},
+			Rules: [][]string{{"eve", "data3_admin"}},
 		},
 	}
 
@@ -211,7 +252,7 @@ func TestEngineLeader(t *testing.T) {
 				Op:    addCommand,
 				Sec:   "p",
 				Ptype: "p",
-				Rule:  []string{"alice", "data1", "read"},
+				Rules: [][]string{{"alice", "data1", "read"}},
 			},
 			[][]string{
 				{"alice", "data1", "read"},
@@ -222,7 +263,7 @@ func TestEngineLeader(t *testing.T) {
 				Op:    addCommand,
 				Sec:   "p",
 				Ptype: "p",
-				Rule:  []string{"bob", "data2", "write"},
+				Rules: [][]string{{"bob", "data2", "write"}},
 			},
 			[][]string{
 				{"alice", "data1", "read"},
@@ -234,7 +275,7 @@ func TestEngineLeader(t *testing.T) {
 				Op:    removeCommand,
 				Sec:   "p",
 				Ptype: "p",
-				Rule:  []string{"alice", "data1", "read"},
+				Rules: [][]string{{"alice", "data1", "read"}},
 			},
 			[][]string{
 				{"bob", "data2", "write"},
@@ -245,7 +286,7 @@ func TestEngineLeader(t *testing.T) {
 				Op:    addCommand,
 				Sec:   "p",
 				Ptype: "p",
-				Rule:  []string{"eve", "data3", "read"},
+				Rules: [][]string{{"eve", "data3", "read"}},
 			},
 			[][]string{
 				{"bob", "data2", "write"},
@@ -257,7 +298,7 @@ func TestEngineLeader(t *testing.T) {
 				Op:    addCommand,
 				Sec:   "p",
 				Ptype: "p",
-				Rule:  []string{"eve", "data3", "read"},
+				Rules: [][]string{{"eve", "data3", "read"}},
 			},
 			[][]string{
 				{"bob", "data2", "write"},
@@ -295,5 +336,19 @@ func (a *fakeAdapter) RemovePolicy(sec string, ptype string, rule []string) erro
 }
 
 func (a *fakeAdapter) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int, fieldValues ...string) error {
+	return nil
+}
+
+func (a *fakeAdapter) AddPolicies(sec string, ptype string, rules [][]string) error {
+	for _, rule := range rules {
+		log.Printf("add policy: %s, %s, %s", sec, ptype, rule)
+	}
+	return nil
+}
+
+func (a *fakeAdapter) RemovePolicies(sec string, ptype string, rules [][]string) error {
+	for _, rule := range rules {
+		log.Printf("remove policy: %s, %s, %s", sec, ptype, rule)
+	}
 	return nil
 }
