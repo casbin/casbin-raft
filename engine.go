@@ -42,10 +42,10 @@ type Engine struct {
 
 // Command represents an instruction to change the state of the engine
 type Command struct {
-	Op    int      `json:"op"`
-	Sec   string   `json:"sec"`
-	Ptype string   `json:"ptype"`
-	Rule  []string `json:"rules"`
+	Op    int        `json:"op"`
+	Sec   string     `json:"sec"`
+	Ptype string     `json:"ptype"`
+	Rules [][]string `json:"rules"`
 }
 
 func newEngine(enforcer *casbin.SyncedEnforcer) *Engine {
@@ -58,13 +58,13 @@ func newEngine(enforcer *casbin.SyncedEnforcer) *Engine {
 func (e *Engine) Apply(c Command) {
 	switch c.Op {
 	case addCommand:
-		_, err := e.applyAdd(c.Sec, c.Ptype, c.Rule)
+		_, err := e.applyAdd(c.Sec, c.Ptype, c.Rules)
 		if err != nil {
 			// need a way to notify the caller, panic temporarily, the same as following
 			panic(err)
 		}
 	case removeCommand:
-		_, err := e.applyRemove(c.Sec, c.Ptype, c.Rule)
+		_, err := e.applyRemove(c.Sec, c.Ptype, c.Rules)
 		if err != nil {
 			panic(err)
 		}
@@ -73,23 +73,23 @@ func (e *Engine) Apply(c Command) {
 	}
 }
 
-func (e *Engine) applyAdd(sec string, ptype string, rule []string) (bool, error) {
-	if e.enforcer.GetModel().HasPolicy(sec, ptype, rule) {
+func (e *Engine) applyAdd(sec string, ptype string, rules [][]string) (bool, error) {
+	if e.enforcer.GetModel().HasPolicies(sec, ptype, rules) {
 		return false, nil
 	}
 
 	if atomic.LoadUint32(&e.isLeader) == 1 && e.enforcer.GetAdapter() != nil {
-		if err := e.enforcer.GetAdapter().AddPolicy(sec, ptype, rule); err != nil {
+		if err := e.enforcer.GetAdapter().(persist.BatchAdapter).AddPolicies(sec, ptype, rules); err != nil {
 			if err.Error() != notImplemented {
 				return false, err
 			}
 		}
 	}
 
-	e.enforcer.GetModel().AddPolicy(sec, ptype, rule)
+	e.enforcer.GetModel().AddPolicies(sec, ptype, rules)
 
 	if sec == "g" {
-		err := e.enforcer.BuildIncrementalRoleLinks(model.PolicyAdd, ptype, [][]string{rule})
+		err := e.enforcer.BuildIncrementalRoleLinks(model.PolicyAdd, ptype, rules)
 		if err != nil {
 			return false, err
 		}
@@ -98,26 +98,26 @@ func (e *Engine) applyAdd(sec string, ptype string, rule []string) (bool, error)
 	return true, nil
 }
 
-func (e *Engine) applyRemove(sec string, ptype string, rule []string) (bool, error) {
-	if !e.enforcer.GetModel().HasPolicy(sec, ptype, rule) {
+func (e *Engine) applyRemove(sec string, ptype string, rules [][]string) (bool, error) {
+	if !e.enforcer.GetModel().HasPolicies(sec, ptype, rules) {
 		return false, nil
 	}
 
 	if atomic.LoadUint32(&e.isLeader) == 1 && e.enforcer.GetAdapter() != nil {
-		if err := e.enforcer.GetAdapter().RemovePolicy(sec, ptype, rule); err != nil {
+		if err := e.enforcer.GetAdapter().(persist.BatchAdapter).RemovePolicies(sec, ptype, rules); err != nil {
 			if err.Error() != notImplemented {
 				return false, err
 			}
 		}
 	}
 
-	ruleRemoved := e.enforcer.GetModel().RemovePolicy(sec, ptype, rule)
+	ruleRemoved := e.enforcer.GetModel().RemovePolicies(sec, ptype, rules)
 	if !ruleRemoved {
 		return ruleRemoved, nil
 	}
 
 	if sec == "g" {
-		err := e.enforcer.BuildIncrementalRoleLinks(model.PolicyRemove, ptype, [][]string{rule})
+		err := e.enforcer.BuildIncrementalRoleLinks(model.PolicyRemove, ptype, rules)
 		if err != nil {
 			return false, err
 		}

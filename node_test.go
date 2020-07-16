@@ -90,10 +90,10 @@ func newCluster(num int) cluster {
 func TestModifyPolicy(t *testing.T) {
 	node := newNode(1)
 	<-time.After(time.Second * 3)
-	node.AddPolicy("p", "p", []string{"alice", "data2", "write"})
-	node.AddPolicy("p", "p", []string{"eve", "data3", "read"})
-	node.RemovePolicy("p", "p", []string{"alice", "data1", "read"})
-	node.RemovePolicy("p", "p", []string{"bob", "data2", "write"})
+	node.AddPolicies("p", "p", [][]string{{"alice", "data2", "write"}})
+	node.AddPolicies("p", "p", [][]string{{"eve", "data3", "read"}})
+	node.RemovePolicies("p", "p", [][]string{{"alice", "data1", "read"}})
+	node.RemovePolicies("p", "p", [][]string{{"bob", "data2", "write"}})
 	<-time.After(time.Second * 3)
 	testEnforce(t, node, "alice", "data2", "write", true)
 	testEnforce(t, node, "eve", "data3", "read", true)
@@ -104,10 +104,10 @@ func TestModifyPolicy(t *testing.T) {
 func TestModifyPolicyCluster(t *testing.T) {
 	c := newCluster(3)
 	<-time.After(time.Second * 3)
-	c[0].AddPolicy("p", "p", []string{"alice", "data2", "write"})
-	c[1].RemovePolicy("p", "p", []string{"alice", "data1", "read"})
-	c[2].RemovePolicy("p", "p", []string{"bob", "data2", "write"})
-	c[2].AddPolicy("p", "p", []string{"eve", "data3", "read"})
+	c[0].AddPolicies("p", "p", [][]string{{"alice", "data2", "write"}})
+	c[1].RemovePolicies("p", "p", [][]string{{"alice", "data1", "read"}})
+	c[2].RemovePolicies("p", "p", [][]string{{"bob", "data2", "write"}})
+	c[2].AddPolicies("p", "p", [][]string{{"eve", "data3", "read"}})
 	<-time.After(time.Second * 3)
 
 	testClusterEnforce(t, c, "alice", "data2", "write", true)
@@ -128,8 +128,8 @@ func TestModifyRBACPolicy(t *testing.T) {
 	node := NewNode(enforcer, 1, peers)
 	go node.Start()
 	<-time.After(time.Second * 3)
-	node.AddPolicy("g", "g", []string{"bob", "data2_admin"})
-	node.RemovePolicy("g", "g", []string{"alice", "data2_admin"})
+	node.AddPolicies("g", "g", [][]string{{"bob", "data2_admin"}})
+	node.RemovePolicies("g", "g", [][]string{{"alice", "data2_admin"}})
 	<-time.After(time.Second * 3)
 	testEnforce(t, node, "alice", "data2", "read", false)
 	testEnforce(t, node, "alice", "data2", "write", false)
@@ -177,7 +177,7 @@ func TestAddMember(t *testing.T) {
 	}
 
 	<-time.After(time.Second * 3)
-	node.AddPolicy("p", "p", []string{"alice", "data2", "write"})
+	node.AddPolicies("p", "p", [][]string{{"alice", "data2", "write"}})
 	<-time.After(time.Second * 3)
 	testClusterEnforce(t, c, "alice", "data2", "write", true)
 	testEnforce(t, node, "alice", "data2", "write", true)
@@ -192,7 +192,7 @@ func TestRemoveMember(t *testing.T) {
 		if n.id == 1 {
 			continue
 		}
-		n.AddPolicy("p", "p", []string{"alice", "data2", "write"})
+		n.AddPolicies("p", "p", [][]string{{"alice", "data2", "write"}})
 		break
 	}
 
@@ -226,7 +226,7 @@ func TestAddMemberRunning(t *testing.T) {
 	}
 	<-time.After(time.Second * 3)
 	for i := 0; i < 50; i++ {
-		c[0].AddPolicy("p", "p", []string{fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read"})
+		c[0].AddPolicies("p", "p", [][]string{{fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read"}})
 	}
 	os.RemoveAll(fmt.Sprintf("casbin-%d", 4))
 	os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 4))
@@ -248,7 +248,7 @@ func TestAddMemberRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 50; i < 100; i++ {
-		c[0].AddPolicy("p", "p", []string{fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read"})
+		c[0].AddPolicies("p", "p", [][]string{{fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read"}})
 	}
 	<-time.After(time.Second * 3)
 	for i := 0; i < 100; i++ {
@@ -262,7 +262,7 @@ func TestSaveSnapshot(t *testing.T) {
 	node.SetSnapshotCount(10)
 	<-time.After(time.Second * 3)
 	for i := 0; i < 101; i++ {
-		node.AddPolicy("p", "p", []string{fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read"})
+		node.AddPolicies("p", "p", [][]string{{fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read"}})
 	}
 	<-time.After(time.Second * 3)
 }
@@ -270,7 +270,7 @@ func TestSaveSnapshot(t *testing.T) {
 func TestRestartFromWAL(t *testing.T) {
 	node := newNode(1)
 	<-time.After(time.Second * 3)
-	node.AddPolicy("p", "p", []string{"alice", "data2", "write"})
+	node.AddPolicies("p", "p", [][]string{{"alice", "data2", "write"}})
 	<-time.After(time.Second * 3)
 	testEnforce(t, node, "alice", "data2", "write", true)
 	node.Stop()
@@ -312,7 +312,7 @@ func TestRestartFromSnapshot(t *testing.T) {
 	node.SetSnapshotCount(10)
 	<-time.After(time.Second * 3)
 	for i := 0; i < 101; i++ {
-		node.AddPolicy("p", "p", []string{fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read"})
+		node.AddPolicies("p", "p", [][]string{{fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read"}})
 	}
 	<-time.After(time.Second * 3)
 	node.Stop()
@@ -353,7 +353,7 @@ func TestRequestToRemovedMember(t *testing.T) {
 	<-time.After(time.Second * 3)
 	for _, n := range c {
 		if n.id == 1 {
-			err := n.AddPolicy("p", "p", []string{"alice", "data2", "write"})
+			err := n.AddPolicies("p", "p", [][]string{{"alice", "data2", "write"}})
 			if err == nil {
 				t.Errorf("Should not be error here.")
 			} else {
@@ -477,7 +477,7 @@ func TestProcessNormal(t *testing.T) {
 		Op:    addCommand,
 		Sec:   "p",
 		Ptype: "p",
-		Rule:  []string{"eve", "data3", "read"},
+		Rules: [][]string{{"eve", "data3", "read"}},
 	}
 	data1, err := json.Marshal(&command1)
 	if err != nil {
@@ -487,7 +487,7 @@ func TestProcessNormal(t *testing.T) {
 		Op:    removeCommand,
 		Sec:   "p",
 		Ptype: "p",
-		Rule:  []string{"eve", "data3", "read"},
+		Rules: [][]string{{"eve", "data3", "read"}},
 	}
 	data2, err := json.Marshal(&command2)
 	if err != nil {
@@ -589,13 +589,13 @@ func TestProcessSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	enforcer.AddPolicy("eve", "data3", "write")
+	enforcer.AddPolicies([][]string{{"eve", "data3", "write"}})
 	data2, err := n.engine.getSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	enforcer.RemovePolicy("bob", "data2", "write")
+	enforcer.RemovePolicies([][]string{{"bob", "data2", "write"}})
 	data3, err := n.engine.getSnapshot()
 	if err != nil {
 		t.Fatal(err)

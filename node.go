@@ -255,8 +255,8 @@ func (n *Node) init() error {
 	var p []raft.Peer
 	// If the node needs to join the cluster, the peers passed in StartNode should be empty.
 	if !n.isJoin {
-		for id, url := range n.membership.members {
-			p = append(p, raft.Peer{ID: id, Context: []byte(url)})
+		for k, v := range n.membership.members {
+			p = append(p, raft.Peer{ID: k, Context: []byte(v)})
 		}
 	}
 
@@ -274,7 +274,7 @@ func (n *Node) init() error {
 
 // serveRaft start the server for internal transmission of raft
 func (n *Node) serveRaft() {
-	url, err := url.Parse(n.membership.GetURL(n.id))
+	u, err := url.Parse(n.membership.GetURL(n.id))
 	if err != nil {
 		log.Fatalf("Failed parsing URL (%v)", err)
 	}
@@ -286,9 +286,9 @@ func (n *Node) serveRaft() {
 			log.Fatalf("Failed loading cert (%v)", err)
 		}
 		tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
-		ln, err = tls.Listen("tcp", url.Host, tlsConfig)
+		ln, err = tls.Listen("tcp", u.Host, tlsConfig)
 	} else {
-		ln, err = net.Listen("tcp", url.Host)
+		ln, err = net.Listen("tcp", u.Host)
 	}
 	if err != nil {
 		log.Fatalf("Failed listening (%v)", err)
@@ -492,7 +492,7 @@ func (n *Node) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
 }
 
 // AddMember add a new node to Cluster.
-func (n *Node) AddMember(id uint64, url string) error {
+func (n *Node) AddMember(id uint64, addr string) error {
 	if n.membership.HasMember(id) {
 		return fmt.Errorf("the node %d has existed in cluster", id)
 	}
@@ -501,7 +501,7 @@ func (n *Node) AddMember(id uint64, url string) error {
 		ID:      1,
 		Type:    raftpb.ConfChangeAddNode,
 		NodeID:  id,
-		Context: []byte(url),
+		Context: []byte(addr),
 	}
 
 	return n.raft.ProposeConfChange(n.ctx, cc)
@@ -521,10 +521,10 @@ func (n *Node) RemoveMember(id uint64) error {
 	return n.raft.ProposeConfChange(n.ctx, cc)
 }
 
-// AddPolicy add a policy to casbin enforcer
+// AddPolicies add policies to casbin enforcer
 // This function is just used for testing.
-func (n *Node) AddPolicy(sec string, ptype string, rules []string) error {
-	if n.engine.enforcer.GetModel().HasPolicy(sec, ptype, rules) {
+func (n *Node) AddPolicies(sec string, ptype string, rules [][]string) error {
+	if n.engine.enforcer.GetModel().HasPolicies(sec, ptype, rules) {
 		return errors.New("policy already exists")
 	}
 
@@ -532,7 +532,7 @@ func (n *Node) AddPolicy(sec string, ptype string, rules []string) error {
 		Op:    addCommand,
 		Sec:   sec,
 		Ptype: ptype,
-		Rule:  rules,
+		Rules: rules,
 	}
 
 	buf, err := json.Marshal(command)
@@ -542,10 +542,10 @@ func (n *Node) AddPolicy(sec string, ptype string, rules []string) error {
 	return n.raft.Propose(n.ctx, buf)
 }
 
-// RemovePolicy remove a policy from casbin enforcer
+// RemovePolicies remove policies from casbin enforcer
 // This function is just used for testing.
-func (n *Node) RemovePolicy(sec string, ptype string, rules []string) error {
-	if !n.engine.enforcer.GetModel().HasPolicy(sec, ptype, rules) {
+func (n *Node) RemovePolicies(sec string, ptype string, rules [][]string) error {
+	if !n.engine.enforcer.GetModel().HasPolicies(sec, ptype, rules) {
 		return errors.New("policy does not exist")
 	}
 
@@ -553,7 +553,7 @@ func (n *Node) RemovePolicy(sec string, ptype string, rules []string) error {
 		Op:    removeCommand,
 		Sec:   sec,
 		Ptype: ptype,
-		Rule:  rules,
+		Rules: rules,
 	}
 
 	buf, err := json.Marshal(command)
