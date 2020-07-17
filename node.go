@@ -45,8 +45,8 @@ import (
 
 const (
 	defaultSnapshotCount uint64 = 10000
-	defaultHeartBeatTick        = 1
-	defaultElectionTick         = 10
+	defaultHeartBeatTick int    = 1
+	defaultElectionTick  int    = 10
 )
 
 // Node is a casbin enforcer backed by raft
@@ -59,7 +59,7 @@ type Node struct {
 	cfg        *raft.Config
 	raft       raft.Node
 	membership *Cluster
-	ticker     <-chan time.Time
+	ticker     *time.Ticker
 	done       chan struct{}
 
 	snapdir     string
@@ -107,7 +107,7 @@ func NewNode(enforcer *casbin.SyncedEnforcer, id uint64, peers map[uint64]string
 		},
 		engine:     engine,
 		membership: membership,
-		ticker:     time.Tick(100 * time.Millisecond),
+		ticker:     time.NewTicker(100 * time.Millisecond),
 		done:       make(chan struct{}),
 		snapdir:    fmt.Sprintf("casbin-%d-snap", id),
 		snapCount:  defaultSnapshotCount,
@@ -287,11 +287,14 @@ func (n *Node) serveRaft() {
 		}
 		tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
 		ln, err = tls.Listen("tcp", u.Host, tlsConfig)
+		if err != nil {
+			log.Fatalf("Failed listening (%v)", err)
+		}
 	} else {
 		ln, err = net.Listen("tcp", u.Host)
-	}
-	if err != nil {
-		log.Fatalf("Failed listening (%v)", err)
+		if err != nil {
+			log.Fatalf("Failed listening (%v)", err)
+		}
 	}
 	n.httpServer = &http.Server{Handler: n.transport.Handler()}
 	err = n.httpServer.Serve(ln)
@@ -303,10 +306,13 @@ func (n *Node) serveRaft() {
 func (n *Node) run() error {
 	for {
 		select {
-		case <-n.ticker:
+		case <-n.ticker.C:
 			n.raft.Tick()
 		case rd := <-n.raft.Ready():
-			n.wal.Save(rd.HardState, rd.Entries)
+			if err := n.wal.Save(rd.HardState, rd.Entries); err != nil {
+				// runtime errors are only printed to the log, as are the following
+				log.Printf("Failed saving wal (%v)", err)
+			}
 			n.saveToStorage(rd.HardState, rd.Entries, rd.Snapshot)
 			n.transport.Send(rd.Messages)
 			if !raft.IsEmptySnap(rd.Snapshot) {
@@ -384,7 +390,9 @@ func (n *Node) triggerSnapshot() {
 }
 
 func (n *Node) saveToStorage(hardState raftpb.HardState, entries []raftpb.Entry, snapshot raftpb.Snapshot) {
-	n.store.Append(entries)
+	if err := n.store.Append(entries); err != nil {
+		log.Printf("Failed storing entries (%v)", err)
+	}
 
 	if !raft.IsEmptyHardState(hardState) {
 		if err := n.store.SetHardState(hardState); err != nil {
