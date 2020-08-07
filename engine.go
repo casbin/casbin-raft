@@ -19,36 +19,42 @@ import (
 	"bytes"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 
-	"github.com/casbin/casbin/v2"
-	"github.com/casbin/casbin/v2/model"
-	"github.com/casbin/casbin/v2/persist"
-	"github.com/casbin/casbin/v2/util"
+	"github.com/casbin/casbin/v3"
+	"github.com/casbin/casbin/v3/model"
+	"github.com/casbin/casbin/v3/persist"
+	"github.com/casbin/casbin/v3/util"
 )
 
 const (
-	addCommand    = 0
-	removeCommand = 1
+	addCommand = iota
+	removeCommand
+	removeFilteredCommand
+	clearCommand
 )
 
 const notImplemented = "not implemented"
 
 // Engine is a wapper for casbin enforcer
 type Engine struct {
-	enforcer *casbin.SyncedEnforcer
+	enforcer *casbin.Enforcer
 	isLeader uint32
+	mutex    sync.Mutex
 }
 
 // Command represents an instruction to change the state of the engine
 type Command struct {
-	Op    int        `json:"op"`
-	Sec   string     `json:"sec"`
-	Ptype string     `json:"ptype"`
-	Rules [][]string `json:"rules"`
+	Op          int        `json:"op"`
+	Sec         string     `json:"sec"`
+	Ptype       string     `json:"ptype"`
+	Rules       [][]string `json:"rules"`
+	FiledIndex  int        `json:"filed_index"`
+	FiledValues []string   `json:"filed_values"`
 }
 
-func newEngine(enforcer *casbin.SyncedEnforcer) *Engine {
+func newEngine(enforcer *casbin.Enforcer) *Engine {
 	return &Engine{
 		enforcer: enforcer,
 	}
@@ -56,6 +62,8 @@ func newEngine(enforcer *casbin.SyncedEnforcer) *Engine {
 
 // Apply applies a Raft log entry to the casbin engine.
 func (e *Engine) Apply(c Command) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
 	switch c.Op {
 	case addCommand:
 		_, err := e.applyAdd(c.Sec, c.Ptype, c.Rules)
@@ -65,6 +73,16 @@ func (e *Engine) Apply(c Command) {
 		}
 	case removeCommand:
 		_, err := e.applyRemove(c.Sec, c.Ptype, c.Rules)
+		if err != nil {
+			panic(err)
+		}
+	case removeFilteredCommand:
+		_, err := e.applyRemoveFiltered(c.Sec, c.Ptype, c.FiledIndex, c.FiledValues...)
+		if err != nil {
+			panic(err)
+		}
+	case clearCommand:
+		err := e.applyClear()
 		if err != nil {
 			panic(err)
 		}
@@ -126,6 +144,37 @@ func (e *Engine) applyRemove(sec string, ptype string, rules [][]string) (bool, 
 	return ruleRemoved, nil
 }
 
+func (e *Engine) applyRemoveFiltered(sec string, ptype string, fieldIndex int, fieldValues ...string) (bool, error) {
+	if atomic.LoadUint32(&e.isLeader) == 1 && e.enforcer.GetAdapter() != nil {
+		if err := e.enforcer.GetAdapter().RemoveFilteredPolicy(sec, ptype, fieldIndex, fieldValues...); err != nil {
+			if err.Error() != notImplemented {
+				return false, err
+			}
+		}
+	}
+
+	ruleRemoved, effects := e.enforcer.GetModel().RemoveFilteredPolicy(sec, ptype, fieldIndex, fieldValues...)
+	if !ruleRemoved {
+		return ruleRemoved, nil
+	}
+
+	if sec == "g" {
+		err := e.enforcer.BuildIncrementalRoleLinks(model.PolicyRemove, ptype, effects)
+		if err != nil {
+			return ruleRemoved, err
+		}
+	}
+	return ruleRemoved, nil
+}
+
+func (e *Engine) applyClear() error {
+	e.enforcer.GetModel().ClearPolicy()
+	if atomic.LoadUint32(&e.isLeader) == 1 {
+		return e.enforcer.SavePolicy()
+	}
+	return nil
+}
+
 // getSnapshot convert model data to snapshot
 func (e *Engine) getSnapshot() ([]byte, error) {
 	var tmp bytes.Buffer
@@ -151,7 +200,7 @@ func (e *Engine) getSnapshot() ([]byte, error) {
 
 // recoverFromSnapshot save the snapshot data to model
 func (e *Engine) recoverFromSnapshot(snapshot []byte) error {
-	e.enforcer.ClearPolicy()
+	e.enforcer.GetModel().ClearPolicy()
 	model := e.enforcer.GetModel()
 	scanner := bufio.NewScanner(bytes.NewReader(snapshot))
 	for scanner.Scan() {

@@ -18,10 +18,10 @@ import (
 	"log"
 	"testing"
 
-	"github.com/casbin/casbin/v2"
-	"github.com/casbin/casbin/v2/model"
-	"github.com/casbin/casbin/v2/persist"
-	"github.com/casbin/casbin/v2/util"
+	"github.com/casbin/casbin/v3"
+	"github.com/casbin/casbin/v3/model"
+	"github.com/casbin/casbin/v3/persist"
+	"github.com/casbin/casbin/v3/util"
 )
 
 func testGetRoles(t *testing.T, e *Engine, res []string, name string, domain ...string) {
@@ -38,7 +38,7 @@ func testGetRoles(t *testing.T, e *Engine, res []string, name string, domain ...
 }
 
 func newTestEngine() *Engine {
-	enforcer, err := casbin.NewSyncedEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
+	enforcer, err := casbin.NewEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
 	if err != nil {
 		panic(err)
 	}
@@ -69,7 +69,7 @@ func TestEngineSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e.enforcer.ClearPolicy()
+	_ = e.enforcer.ClearPolicy()
 	testGetPolicy(t, e, [][]string{})
 	err = e.recoverFromSnapshot(data)
 	if err != nil {
@@ -81,6 +81,7 @@ func TestEngineSnapshot(t *testing.T) {
 		{"data2_admin", "data2", "read"},
 		{"data2_admin", "data2", "write"},
 	})
+	_ = e.enforcer.SavePolicy()
 }
 
 func TestEngineApplyPolicy(t *testing.T) {
@@ -200,6 +201,38 @@ func TestEngineApplyPolicy(t *testing.T) {
 				{"ham", "data4", "write"},
 			},
 		},
+		{
+			Command{
+				Op:          removeFilteredCommand,
+				Sec:         "p",
+				Ptype:       "p",
+				FiledIndex:  1,
+				FiledValues: []string{"data2"},
+			},
+			[][]string{
+				{"eve", "data3", "read"},
+				{"leyo", "data4", "read"},
+				{"ham", "data4", "write"},
+			},
+		},
+		{
+			Command{
+				Op:          removeFilteredCommand,
+				Sec:         "p",
+				Ptype:       "p",
+				FiledIndex:  2,
+				FiledValues: []string{"read"},
+			},
+			[][]string{
+				{"ham", "data4", "write"},
+			},
+		},
+		{
+			Command{
+				Op: clearCommand,
+			},
+			[][]string{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -250,7 +283,7 @@ func TestEngineApplyGroupPolicy(t *testing.T) {
 }
 
 func TestEngineLeader(t *testing.T) {
-	enforcer, err := casbin.NewSyncedEnforcer("examples/rbac_model.conf", new(fakeAdapter))
+	enforcer, err := casbin.NewEnforcer("examples/rbac_model.conf", new(fakeAdapter))
 	if err != nil {
 		t.Fatal(err)
 	}
