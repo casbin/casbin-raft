@@ -29,8 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/casbin/casbin/v2"
-
+	"github.com/casbin/casbin/v3"
 	"github.com/coreos/etcd/etcdserver/stats"
 	"github.com/coreos/etcd/pkg/transport"
 	"github.com/coreos/etcd/pkg/types"
@@ -83,7 +82,7 @@ type Node struct {
 
 // NewNode return a instance of node, the peers is a collection of
 // id and url of all nodes in the cluster
-func NewNode(enforcer *casbin.SyncedEnforcer, id uint64, peers map[uint64]string, join ...bool) *Node {
+func NewNode(id uint64, peers map[uint64]string, join ...bool) *Node {
 	isJoin := false
 	if len(join) > 0 {
 		// the join parameter takes only the first to ignore the rest
@@ -91,7 +90,6 @@ func NewNode(enforcer *casbin.SyncedEnforcer, id uint64, peers map[uint64]string
 	}
 	store := raft.NewMemoryStorage()
 	membership := NewCluster(peers)
-	engine := newEngine(enforcer)
 	n := &Node{
 		id:     id,
 		ctx:    context.TODO(),
@@ -105,7 +103,6 @@ func NewNode(enforcer *casbin.SyncedEnforcer, id uint64, peers map[uint64]string
 			MaxSizePerMsg:   math.MaxUint16,
 			MaxInflightMsgs: 256,
 		},
-		engine:     engine,
 		membership: membership,
 		ticker:     time.NewTicker(100 * time.Millisecond),
 		done:       make(chan struct{}),
@@ -115,6 +112,17 @@ func NewNode(enforcer *casbin.SyncedEnforcer, id uint64, peers map[uint64]string
 	}
 
 	return n
+}
+
+// SetEnforcer set up the instance that need to be maintained.
+// The parameter should be SyncedEnforced
+func (n *Node) SetEnforcer(enforcer interface{}) error {
+	value, ok := enforcer.(*casbin.Enforcer)
+	if !ok {
+		return errors.New("type of parameter should be *casbin.Enforcer")
+	}
+	n.engine = newEngine(value)
+	return nil
 }
 
 // SetSnapshotCount set the number of logs that trigger a snapshot save.
@@ -530,7 +538,7 @@ func (n *Node) RemoveMember(id uint64) error {
 }
 
 // AddPolicies add policies to casbin enforcer
-// This function is just used for testing.
+// This function will be call by casbin. Please call casbin ManagementAPI for use.
 func (n *Node) AddPolicies(sec string, ptype string, rules [][]string) error {
 	if n.engine.enforcer.GetModel().HasPolicies(sec, ptype, rules) {
 		return errors.New("policy already exists")
@@ -551,7 +559,7 @@ func (n *Node) AddPolicies(sec string, ptype string, rules [][]string) error {
 }
 
 // RemovePolicies remove policies from casbin enforcer
-// This function is just used for testing.
+// This function will be call by casbin. Please call casbin ManagementAPI for use.
 func (n *Node) RemovePolicies(sec string, ptype string, rules [][]string) error {
 	if !n.engine.enforcer.GetModel().HasPolicies(sec, ptype, rules) {
 		return errors.New("policy does not exist")
@@ -562,6 +570,38 @@ func (n *Node) RemovePolicies(sec string, ptype string, rules [][]string) error 
 		Sec:   sec,
 		Ptype: ptype,
 		Rules: rules,
+	}
+
+	buf, err := json.Marshal(command)
+	if err != nil {
+		return err
+	}
+	return n.raft.Propose(n.ctx, buf)
+}
+
+// RemoveFilteredPolicy  removes a role inheritance rule from the current named policy, field filters can be specified.
+// This function will be call by casbin. Please call casbin ManagementAPI for use.
+func (n *Node) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int, fieldValues ...string) error {
+	command := Command{
+		Op:          removeFilteredCommand,
+		Sec:         sec,
+		Ptype:       ptype,
+		FiledIndex:  fieldIndex,
+		FiledValues: fieldValues,
+	}
+
+	buf, err := json.Marshal(command)
+	if err != nil {
+		return err
+	}
+	return n.raft.Propose(n.ctx, buf)
+}
+
+// ClearPolicy clears all policy.
+// This function will be call by casbin. Please call casbin ManagementAPI for use.
+func (n *Node) ClearPolicy() error {
+	command := Command{
+		Op: clearCommand,
 	}
 
 	buf, err := json.Marshal(command)

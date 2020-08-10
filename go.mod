@@ -3,7 +3,7 @@ module github.com/casbin/casbin-raft
 go 1.13
 
 require (
-	github.com/casbin/casbin/v2 v2.8.2
+	github.com/casbin/casbin/v3 v3.0.0-beta.1.0.20200806093901-cf1eac5727a9
 	github.com/coreos/etcd v3.3.22+incompatible
 	github.com/coreos/go-semver v0.3.0 // indirect
 	github.com/coreos/go-systemd v0.0.0-00010101000000-000000000000 // indirect
