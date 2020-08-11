@@ -3,7 +3,7 @@ module github.com/casbin/casbin-raft
 go 1.13
 
 require (
-	github.com/casbin/casbin/v3 v3.0.0-beta.1.0.20200806093901-cf1eac5727a9
+	github.com/casbin/casbin/v3 v3.0.0-beta.2
 	github.com/coreos/etcd v3.3.22+incompatible
 	github.com/coreos/go-semver v0.3.0 // indirect
 	github.com/coreos/go-systemd v0.0.0-00010101000000-000000000000 // indirect
@@ -15,7 +15,7 @@ require (
 	github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2 // indirect
 	go.uber.org/zap v1.15.0 // indirect
 	golang.org/x/time v0.0.0-20200630173020-3af7569d3a1e // indirect
-	google.golang.org/grpc v1.30.0 // indirect
+	google.golang.org/grpc v1.31.0 // indirect
 )
 
 replace github.com/coreos/go-systemd => github.com/coreos/go-systemd/v22 v22.0.0

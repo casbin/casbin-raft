@@ -45,7 +45,7 @@ func newTestEngine() *Engine {
 	return newEngine(enforcer)
 }
 
-func testGetPolicy(t *testing.T, e *Engine, res [][]string) {
+func testEngineGetPolicy(t *testing.T, e *Engine, res [][]string) {
 	t.Helper()
 	myRes := e.enforcer.GetPolicy()
 	t.Log("Policy: ", myRes)
@@ -57,7 +57,7 @@ func testGetPolicy(t *testing.T, e *Engine, res [][]string) {
 
 func TestEngineSnapshot(t *testing.T) {
 	e := newTestEngine()
-	testGetPolicy(t, e, [][]string{
+	testEngineGetPolicy(t, e, [][]string{
 		{"alice", "data1", "read"},
 		{"bob", "data2", "write"},
 		{"data2_admin", "data2", "read"},
@@ -70,12 +70,12 @@ func TestEngineSnapshot(t *testing.T) {
 	}
 
 	_ = e.enforcer.ClearPolicy()
-	testGetPolicy(t, e, [][]string{})
+	testEngineGetPolicy(t, e, [][]string{})
 	err = e.recoverFromSnapshot(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	testGetPolicy(t, e, [][]string{
+	testEngineGetPolicy(t, e, [][]string{
 		{"alice", "data1", "read"},
 		{"bob", "data2", "write"},
 		{"data2_admin", "data2", "read"},
@@ -86,7 +86,7 @@ func TestEngineSnapshot(t *testing.T) {
 
 func TestEngineApplyPolicy(t *testing.T) {
 	e := newTestEngine()
-	testGetPolicy(t, e, [][]string{
+	testEngineGetPolicy(t, e, [][]string{
 		{"alice", "data1", "read"},
 		{"bob", "data2", "write"},
 		{"data2_admin", "data2", "read"},
@@ -237,7 +237,7 @@ func TestEngineApplyPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		e.Apply(tt.c)
-		testGetPolicy(t, e, tt.res)
+		testEngineGetPolicy(t, e, tt.res)
 	}
 }
 
@@ -356,7 +356,7 @@ func TestEngineLeader(t *testing.T) {
 
 	for _, tt := range tests {
 		e.Apply(tt.c)
-		testGetPolicy(t, e, tt.res)
+		testEngineGetPolicy(t, e, tt.res)
 	}
 }
 
