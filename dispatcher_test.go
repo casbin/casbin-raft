@@ -29,7 +29,12 @@ import (
 	"github.com/coreos/etcd/raft/raftpb"
 )
 
-type cluster []*Node
+type node struct {
+	e *casbin.Enforcer
+	d *Dispatcher
+}
+
+type cluster []*node
 
 func GetFreePort() int {
 	addr, _ := net.ResolveTCPAddr("tcp", "localhost:0")
@@ -40,47 +45,53 @@ func GetFreePort() int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-func testEnforce(t *testing.T, n *Node, sub string, obj string, act string, res bool) {
+func testEnforce(t *testing.T, n *node, sub string, obj string, act string, res bool) {
 	t.Helper()
-	if myRes, _ := n.engine.enforcer.Enforce(sub, obj, act); myRes != res {
-		t.Errorf("%s, %v, %s: %t, node %d supposed to be %t", sub, obj, act, myRes, n.id, res)
+	if myRes, _ := n.e.Enforce(sub, obj, act); myRes != res {
+		t.Errorf("%s, %v, %s: %t, node %d supposed to be %t", sub, obj, act, myRes, n.d.id, res)
 	}
 }
 
 func testClusterEnforce(t *testing.T, c cluster, sub string, obj string, act string, res bool) {
-	for _, n := range c {
-		testEnforce(t, n, sub, obj, act, res)
+	for _, e := range c {
+		testEnforce(t, e, sub, obj, act, res)
 	}
 }
 
-func testEnforcerGetPolicy(t *testing.T, e *casbin.Enforcer, res [][]string) {
+func testGetPolicy(t *testing.T, n *node, res [][]string) {
 	t.Helper()
-	myRes := e.GetPolicy()
+	myRes := n.e.GetPolicy()
 	t.Log("Policy: ", myRes)
 
 	if !util.Array2DEquals(res, myRes) {
-		t.Error("Policy: ", myRes, ", supposed to be ", res)
+		t.Error("Policy: ", myRes, ", node %d supposed to be ", n.d.id, res)
 	}
 }
 
-func newNode(id uint64) *Node {
+func testClusterGetPolicy(t *testing.T, c cluster, res [][]string) {
+	for _, e := range c {
+		testGetPolicy(t, e, res)
+	}
+}
+
+func newNode(id uint64) *node {
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d", id))
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", id))
 	peers := make(map[uint64]string)
 	peers[id] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
-	enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	e, err := casbin.NewEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
 	if err != nil {
 		panic(err)
 	}
-	node := NewNode(id, peers)
-	_ = node.SetEnforcer(enforcer)
-
+	d := NewDispatcher(id, peers)
+	_ = e.SetDispatcher(d)
+	e.EnableautoNotifyDispatcher(true)
 	go func() {
-		if err := node.Start(); err != nil {
+		if err := d.Start(); err != nil {
 			panic(err)
 		}
 	}()
-	return node
+	return &node{e, d}
 }
 
 func newCluster(num int) cluster {
@@ -93,90 +104,150 @@ func newCluster(num int) cluster {
 	for id := range peers {
 		_ = os.RemoveAll(fmt.Sprintf("casbin-%d", id))
 		_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", id))
-		enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+		e, err := casbin.NewEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
 		if err != nil {
 			panic(err)
 		}
-		n := NewNode(id, peers)
-		_ = n.SetEnforcer(enforcer)
+		d := NewDispatcher(id, peers)
+		_ = e.SetDispatcher(d)
+		e.EnableautoNotifyDispatcher(true)
 		go func() {
-			if err := n.Start(); err != nil {
+			if err := d.Start(); err != nil {
 				panic(err)
 			}
 		}()
-		c = append(c, n)
+		c = append(c, &node{e, d})
 	}
 	return c
 }
 
 func TestModifyPolicy(t *testing.T) {
-	node := newNode(1)
+	n := newNode(1)
 	<-time.After(time.Second * 3)
-	_ = node.AddPolicies("p", "p", [][]string{{"alice", "data2", "write"}})
-	_ = node.AddPolicies("p", "p", [][]string{{"eve", "data3", "read"}})
-	_ = node.RemovePolicies("p", "p", [][]string{{"alice", "data1", "read"}})
-	_ = node.RemovePolicies("p", "p", [][]string{{"bob", "data2", "write"}})
-	<-time.After(time.Second * 3)
-	testEnforce(t, node, "alice", "data2", "write", true)
-	testEnforce(t, node, "eve", "data3", "read", true)
-	testEnforce(t, node, "alice", "data1", "read", false)
-	testEnforce(t, node, "bob", "data2", "write", false)
+	testGetPolicy(t, n, [][]string{
+		{"alice", "data1", "read"},
+		{"bob", "data2", "write"},
+		{"data2_admin", "data2", "read"},
+		{"data2_admin", "data2", "write"}})
 
-	_ = node.RemoveFilteredPolicy("p", "p", 0, "alice")
+	_, _ = n.e.RemovePolicy("alice", "data1", "read")
+	_, _ = n.e.RemovePolicy("bob", "data2", "write")
+	_, _ = n.e.RemovePolicy("alice", "data1", "read")
+	_, _ = n.e.AddPolicy("eve", "data3", "read")
+	_, _ = n.e.AddPolicy("eve", "data3", "read")
 	<-time.After(time.Second * 3)
-	testEnforce(t, node, "alice", "data2", "write", false)
-	testEnforce(t, node, "eve", "data3", "read", true)
-	testEnforce(t, node, "alice", "data1", "read", false)
-	testEnforce(t, node, "bob", "data2", "write", false)
+	rules := [][]string{
+		{"jack", "data4", "read"},
+		{"jack", "data4", "read"},
+		{"jack", "data4", "read"},
+		{"katy", "data4", "write"},
+		{"leyo", "data4", "read"},
+		{"katy", "data4", "write"},
+		{"katy", "data4", "write"},
+		{"ham", "data4", "write"},
+	}
+
+	_, _ = n.e.AddPolicies(rules)
+	_, _ = n.e.AddPolicies(rules)
+	<-time.After(time.Second * 3)
+	testGetPolicy(t, n, [][]string{
+		{"data2_admin", "data2", "read"},
+		{"data2_admin", "data2", "write"},
+		{"eve", "data3", "read"},
+		{"jack", "data4", "read"},
+		{"katy", "data4", "write"},
+		{"leyo", "data4", "read"},
+		{"ham", "data4", "write"}})
+
+	_, _ = n.e.RemovePolicies(rules)
+	_, _ = n.e.RemovePolicies(rules)
+	<-time.After(time.Second * 3)
+	testGetPolicy(t, n, [][]string{
+		{"data2_admin", "data2", "read"},
+		{"data2_admin", "data2", "write"},
+		{"eve", "data3", "read"}})
+
+	_, _ = n.e.RemoveFilteredPolicy(1, "data2")
+	<-time.After(time.Second * 3)
+	testGetPolicy(t, n, [][]string{{"eve", "data3", "read"}})
 }
 
 func TestModifyPolicyCluster(t *testing.T) {
 	c := newCluster(3)
 	<-time.After(time.Second * 3)
-	_ = c[0].AddPolicies("p", "p", [][]string{{"alice", "data2", "write"}})
-	_ = c[1].RemovePolicies("p", "p", [][]string{{"alice", "data1", "read"}})
-	_ = c[2].RemovePolicies("p", "p", [][]string{{"bob", "data2", "write"}})
-	_ = c[2].AddPolicies("p", "p", [][]string{{"eve", "data3", "read"}})
+	testClusterGetPolicy(t, c, [][]string{
+		{"alice", "data1", "read"},
+		{"bob", "data2", "write"},
+		{"data2_admin", "data2", "read"},
+		{"data2_admin", "data2", "write"}})
+
+	_, _ = c[0].e.RemovePolicy("alice", "data1", "read")
+	_, _ = c[1].e.RemovePolicy("bob", "data2", "write")
+	_, _ = c[2].e.RemovePolicy("alice", "data1", "read")
+	_, _ = c[2].e.AddPolicy("eve", "data3", "read")
+	_, _ = c[2].e.AddPolicy("eve", "data3", "read")
 	<-time.After(time.Second * 3)
-
-	testClusterEnforce(t, c, "alice", "data2", "write", true)
-	testClusterEnforce(t, c, "alice", "data1", "read", false)
-	testClusterEnforce(t, c, "bob", "data2", "write", false)
-	testClusterEnforce(t, c, "eve", "data3", "read", true)
-
-	_ = c[2].RemoveFilteredPolicy("p", "p", 0, "alice")
-	<-time.After(time.Second * 3)
-	testClusterEnforce(t, c, "alice", "data2", "write", false)
-	testClusterEnforce(t, c, "alice", "data1", "read", false)
-	testClusterEnforce(t, c, "bob", "data2", "write", false)
-	testClusterEnforce(t, c, "eve", "data3", "read", true)
-}
-
-func TestModifyRBACPolicy(t *testing.T) {
-	_ = os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
-	_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
-	peers := make(map[uint64]string)
-	peers[1] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
-	enforcer, err := casbin.NewEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
-	if err != nil {
-		t.Fatal(err)
+	rules := [][]string{
+		{"jack", "data4", "read"},
+		{"jack", "data4", "read"},
+		{"jack", "data4", "read"},
+		{"katy", "data4", "write"},
+		{"leyo", "data4", "read"},
+		{"katy", "data4", "write"},
+		{"katy", "data4", "write"},
+		{"ham", "data4", "write"},
 	}
-	node := NewNode(1, peers)
-	_ = node.SetEnforcer(enforcer)
-	go func() {
-		if err := node.Start(); err != nil {
-			panic(err)
-		}
-	}()
+
+	_, _ = c[0].e.AddPolicies(rules)
+	_, _ = c[1].e.AddPolicies(rules)
 	<-time.After(time.Second * 3)
-	_ = node.AddPolicies("g", "g", [][]string{{"bob", "data2_admin"}})
-	_ = node.RemovePolicies("g", "g", [][]string{{"alice", "data2_admin"}})
+	testClusterGetPolicy(t, c, [][]string{
+		{"data2_admin", "data2", "read"},
+		{"data2_admin", "data2", "write"},
+		{"eve", "data3", "read"},
+		{"jack", "data4", "read"},
+		{"katy", "data4", "write"},
+		{"leyo", "data4", "read"},
+		{"ham", "data4", "write"}})
+
+	_, _ = c[2].e.RemovePolicies(rules)
+	_, _ = c[2].e.RemovePolicies(rules)
 	<-time.After(time.Second * 3)
-	testEnforce(t, node, "alice", "data2", "read", false)
-	testEnforce(t, node, "alice", "data2", "write", false)
-	testEnforce(t, node, "bob", "data2", "read", true)
-	testEnforce(t, node, "bob", "data2", "write", true)
+	testClusterGetPolicy(t, c, [][]string{
+		{"data2_admin", "data2", "read"},
+		{"data2_admin", "data2", "write"},
+		{"eve", "data3", "read"}})
+
+	_, _ = c[1].e.RemoveFilteredPolicy(1, "data2")
+	<-time.After(time.Second * 3)
+	testClusterGetPolicy(t, c, [][]string{{"eve", "data3", "read"}})
 }
+
+// func TestModifyRBACPolicy(t *testing.T) {
+// 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
+// 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
+// 	peers := make(map[uint64]string)
+// 	peers[1] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
+// 	enforcer, err := casbin.NewEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	node := NewDispatcher(1, peers)
+// 	_ = node.SetEnforcer(enforcer)
+// 	go func() {
+// 		if err := node.Start(); err != nil {
+// 			panic(err)
+// 		}
+// 	}()
+// 	<-time.After(time.Second * 3)
+// 	_ = node.AddPolicies("g", "g", [][]string{{"bob", "data2_admin"}})
+// 	_ = node.RemovePolicies("g", "g", [][]string{{"alice", "data2_admin"}})
+// 	<-time.After(time.Second * 3)
+// 	testEnforce(t, node, "alice", "data2", "read", false)
+// 	testEnforce(t, node, "alice", "data2", "write", false)
+// 	testEnforce(t, node, "bob", "data2", "read", true)
+// 	testEnforce(t, node, "bob", "data2", "write", true)
+// }
 
 func TestAddMember(t *testing.T) {
 	peers := make(map[uint64]string)
@@ -188,18 +259,19 @@ func TestAddMember(t *testing.T) {
 	for id := range peers {
 		_ = os.RemoveAll(fmt.Sprintf("casbin-%d", id))
 		_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", id))
-		enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+		e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 		if err != nil {
 			t.Fatal(err)
 		}
-		n := NewNode(id, peers)
-		_ = n.SetEnforcer(enforcer)
+		d := NewDispatcher(id, peers)
+		_ = e.SetDispatcher(d)
+		e.EnableautoNotifyDispatcher(true)
 		go func() {
-			if err := n.Start(); err != nil {
+			if err := d.Start(); err != nil {
 				panic(err)
 			}
 		}()
-		c = append(c, n)
+		c = append(c, &node{e, d})
 	}
 
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d", 4))
@@ -209,51 +281,52 @@ func TestAddMember(t *testing.T) {
 	p[2] = "http://127.0.0.1:10002"
 	p[3] = "http://127.0.0.1:10003"
 	p[4] = "http://127.0.0.1:10004"
-	enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	node := NewNode(4, p, true)
-	_ = node.SetEnforcer(enforcer)
+	d := NewDispatcher(4, p, true)
+	_ = e.SetDispatcher(d)
+	e.EnableautoNotifyDispatcher(true)
 	go func() {
-		if err := node.Start(); err != nil {
+		if err := d.Start(); err != nil {
 			panic(err)
 		}
 	}()
 	<-time.After(time.Second * 3)
-	err = c[0].AddMember(4, "http://127.0.0.1:10004")
+	err = c[0].d.AddMember(4, "http://127.0.0.1:10004")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	<-time.After(time.Second * 3)
-	_ = node.AddPolicies("p", "p", [][]string{{"alice", "data2", "write"}})
+	_, _ = e.AddPolicy("alice", "data2", "write")
 	<-time.After(time.Second * 3)
 	testClusterEnforce(t, c, "alice", "data2", "write", true)
-	testEnforce(t, node, "alice", "data2", "write", true)
+	testEnforce(t, &node{e, d}, "alice", "data2", "write", true)
 }
 
 func TestRemoveMember(t *testing.T) {
 	c := newCluster(3)
 	<-time.After(time.Second * 3)
-	_ = c[1].RemoveMember(1)
+	_ = c[1].d.RemoveMember(1)
 	<-time.After(time.Second * 3)
 	for _, n := range c {
-		if n.id == 1 {
+		if n.d.id == 1 {
 			continue
 		}
-		_ = n.AddPolicies("p", "p", [][]string{{"alice", "data2", "write"}})
+		_, _ = n.e.AddPolicy("bob", "data2", "read")
 		break
 	}
 
 	<-time.After(time.Second * 3)
 	for _, n := range c {
 		result := true
-		if n.id == 1 {
+		if n.d.id == 1 {
 			result = false
 		}
-		testEnforce(t, n, "alice", "data2", "write", result)
+		testEnforce(t, n, "bob", "data2", "read", result)
 	}
 }
 
@@ -267,22 +340,23 @@ func TestAddMemberRunning(t *testing.T) {
 	for id := range peers {
 		_ = os.RemoveAll(fmt.Sprintf("casbin-%d", id))
 		_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", id))
-		enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+		e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 		if err != nil {
 			t.Fatal(err)
 		}
-		n := NewNode(id, peers)
-		_ = n.SetEnforcer(enforcer)
+		d := NewDispatcher(id, peers)
+		_ = e.SetDispatcher(d)
+		e.EnableautoNotifyDispatcher(true)
 		go func() {
-			if err := n.Start(); err != nil {
+			if err := d.Start(); err != nil {
 				panic(err)
 			}
 		}()
-		c = append(c, n)
+		c = append(c, &node{e, d})
 	}
 	<-time.After(time.Second * 3)
 	for i := 0; i < 50; i++ {
-		_ = c[0].AddPolicies("p", "p", [][]string{{fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read"}})
+		_, _ = c[0].e.AddPolicy(fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read")
 	}
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d", 4))
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 4))
@@ -291,67 +365,69 @@ func TestAddMemberRunning(t *testing.T) {
 	p[2] = "http://127.0.0.1:8002"
 	p[3] = "http://127.0.0.1:8003"
 	p[4] = "http://127.0.0.1:8004"
-	enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	node := NewNode(4, p, true)
-	_ = node.SetEnforcer(enforcer)
+	d := NewDispatcher(4, p, true)
+	_ = e.SetDispatcher(d)
+	e.EnableautoNotifyDispatcher(true)
 	go func() {
-		if err := node.Start(); err != nil {
+		if err := d.Start(); err != nil {
 			panic(err)
 		}
 	}()
 	<-time.After(time.Second * 3)
-	err = c[0].AddMember(4, "http://127.0.0.1:8004")
+	err = c[0].d.AddMember(4, "http://127.0.0.1:8004")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 50; i < 100; i++ {
-		_ = c[0].AddPolicies("p", "p", [][]string{{fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read"}})
+		_, _ = c[0].e.AddPolicy(fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read")
 	}
 	<-time.After(time.Second * 3)
 	for i := 0; i < 100; i++ {
 		testClusterEnforce(t, c, fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read", true)
-		testEnforce(t, node, fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read", true)
+		testEnforce(t, &node{e, d}, fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read", true)
 	}
 }
 
 func TestSaveSnapshot(t *testing.T) {
 	node := newNode(1)
-	node.SetSnapshotCount(10)
+	node.d.SetSnapshotCount(10)
 	<-time.After(time.Second * 3)
 	for i := 0; i < 101; i++ {
-		_ = node.AddPolicies("p", "p", [][]string{{fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read"}})
+		_, _ = node.e.AddPolicy(fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read")
 	}
 	<-time.After(time.Second * 3)
 }
 
 func TestRestartFromWAL(t *testing.T) {
-	node := newNode(1)
+	n := newNode(1)
 	<-time.After(time.Second * 3)
-	_ = node.AddPolicies("p", "p", [][]string{{"alice", "data2", "write"}})
+	_, _ = n.e.AddPolicy("alice", "data2", "write")
 	<-time.After(time.Second * 3)
-	testEnforce(t, node, "alice", "data2", "write", true)
-	node.Stop()
+	testEnforce(t, n, "alice", "data2", "write", true)
+	n.d.Stop()
 	<-time.After(time.Second * 3)
 	peers := make(map[uint64]string)
 	peers[1] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
-	enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodeRestart := NewNode(1, peers)
-	_ = nodeRestart.SetEnforcer(enforcer)
+	d := NewDispatcher(1, peers)
+	_ = e.SetDispatcher(d)
+	e.EnableautoNotifyDispatcher(true)
 	go func() {
-		err := nodeRestart.Restart()
+		err := d.Restart()
 		if err != nil {
 			panic(err)
 		}
 	}()
 	<-time.After(time.Second * 3)
-	testEnforce(t, nodeRestart, "alice", "data2", "write", true)
+	testEnforce(t, &node{e, d}, "alice", "data2", "write", true)
 }
 
 func TestRestartFromLockedWAL(t *testing.T) {
@@ -360,13 +436,14 @@ func TestRestartFromLockedWAL(t *testing.T) {
 	<-time.After(time.Second * 3)
 	peers := make(map[uint64]string)
 	peers[1] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
-	enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodeRestart := NewNode(1, peers)
-	_ = nodeRestart.SetEnforcer(enforcer)
-	err = nodeRestart.Restart()
+	d := NewDispatcher(1, peers)
+	_ = e.SetDispatcher(d)
+	e.EnableautoNotifyDispatcher(true)
+	err = d.Restart()
 	if err == nil {
 		t.Errorf("Should not be error here.")
 	} else {
@@ -376,45 +453,47 @@ func TestRestartFromLockedWAL(t *testing.T) {
 }
 
 func TestRestartFromSnapshot(t *testing.T) {
-	node := newNode(1)
-	node.SetSnapshotCount(10)
+	n := newNode(1)
+	n.d.SetSnapshotCount(10)
 	<-time.After(time.Second * 3)
 	for i := 0; i < 101; i++ {
-		_ = node.AddPolicies("p", "p", [][]string{{fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read"}})
+		_, _ = n.e.AddPolicy(fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read")
 	}
 	<-time.After(time.Second * 3)
-	node.Stop()
+	n.d.Stop()
 	<-time.After(time.Second * 3)
 	peers := make(map[uint64]string)
 	peers[1] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
-	enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	e, err := casbin.NewEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodeRestart := NewNode(1, peers)
-	_ = nodeRestart.SetEnforcer(enforcer)
+	d := NewDispatcher(1, peers)
+	_ = e.SetDispatcher(d)
+	e.EnableautoNotifyDispatcher(true)
 	go func() {
-		err := nodeRestart.Restart()
+		err := d.Restart()
 		if err != nil {
 			panic(err)
 		}
 	}()
 	<-time.After(time.Second * 3)
 	for i := 0; i < 101; i++ {
-		testEnforce(t, nodeRestart, fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read", true)
+		testEnforce(t, &node{e, d}, fmt.Sprintf("user%d", i), fmt.Sprintf("data%d", i/10), "read", true)
 	}
 }
 
 func TestRestartFromEmpty(t *testing.T) {
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
-	enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := NewNode(1, nil)
-	_ = n.SetEnforcer(enforcer)
-	err = n.Restart()
+	d := NewDispatcher(1, nil)
+	_ = e.SetDispatcher(d)
+	e.EnableautoNotifyDispatcher(true)
+	err = d.Restart()
 	t.Log(err)
 	if err == nil {
 		t.Error("expect err, get nil")
@@ -424,14 +503,14 @@ func TestRestartFromEmpty(t *testing.T) {
 func TestRequestToRemovedMember(t *testing.T) {
 	c := newCluster(3)
 	<-time.After(time.Second * 3)
-	err := c[1].RemoveMember(1)
+	err := c[1].d.RemoveMember(1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-time.After(time.Second * 3)
 	for _, n := range c {
-		if n.id == 1 {
-			err := n.AddPolicies("p", "p", [][]string{{"alice", "data2", "write"}})
+		if n.d.id == 1 {
+			_, err := n.e.AddPolicy("alice", "data2", "write")
 			if err == nil {
 				t.Errorf("Should not be error here.")
 			} else {
@@ -443,8 +522,8 @@ func TestRequestToRemovedMember(t *testing.T) {
 	}
 }
 
-func TestInitNode(t *testing.T) {
-	var n *Node
+func TestInit(t *testing.T) {
+	var d *Dispatcher
 	tests := []struct {
 		beforeFunc func()
 		hasErr     bool
@@ -482,14 +561,15 @@ func TestInitNode(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+		e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 		if err != nil {
 			t.Fatal(err)
 		}
-		n = NewNode(1, nil)
-		_ = n.SetEnforcer(enforcer)
+		d = NewDispatcher(1, nil)
+		_ = e.SetDispatcher(d)
+		e.EnableautoNotifyDispatcher(true)
 		tt.beforeFunc()
-		err = n.init()
+		err = d.init()
 		if ok := err != nil; ok != tt.hasErr {
 			t.Errorf("get err %s", err)
 		}
@@ -525,14 +605,14 @@ func TestRestartNode(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+		e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 		if err != nil {
 			t.Fatal(err)
 		}
-		n := NewNode(1, nil)
-		_ = n.SetEnforcer(enforcer)
+		d := NewDispatcher(1, nil)
+		_ = e.SetDispatcher(d)
 		tt.beforeFunc()
-		err = n.Restart()
+		err = d.Restart()
 		t.Log(err)
 
 		if ok := err != nil; ok != tt.hasErr {
@@ -544,13 +624,13 @@ func TestRestartNode(t *testing.T) {
 func TestProcessNormal(t *testing.T) {
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
-	enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := NewNode(1, nil)
-	_ = n.SetEnforcer(enforcer)
-	err = n.init()
+	d := NewDispatcher(1, nil)
+	_ = e.SetDispatcher(d)
+	err = d.init()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,26 +674,26 @@ func TestProcessNormal(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		n.process(tt.entry)
-		testEnforce(t, n, "eve", "data3", "read", tt.res)
+		d.process(tt.entry)
+		testEnforce(t, &node{e, d}, "eve", "data3", "read", tt.res)
 	}
 }
 
 func TestProcessConfchange(t *testing.T) {
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
-	enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 	if err != nil {
 		t.Fatal(err)
 	}
 	peers := make(map[uint64]string)
-	n := NewNode(1, peers)
-	_ = n.SetEnforcer(enforcer)
-	err = n.init()
+	d := NewDispatcher(1, peers)
+	_ = e.SetDispatcher(d)
+	err = d.init()
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = n.initTransport()
+	err = d.initTransport()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,9 +730,9 @@ func TestProcessConfchange(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		n.process(tt.entry)
-		if !reflect.DeepEqual(&tt.state, n.confState) {
-			t.Errorf("confState %v \n want %v", n.confState, tt.state)
+		d.process(tt.entry)
+		if !reflect.DeepEqual(&tt.state, d.confState) {
+			t.Errorf("confState %v \n want %v", d.confState, tt.state)
 		}
 	}
 
@@ -661,27 +741,27 @@ func TestProcessConfchange(t *testing.T) {
 func TestProcessSnapshot(t *testing.T) {
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
-	enforcer, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+	e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := NewNode(1, nil)
-	_ = n.SetEnforcer(enforcer)
-	if err := n.init(); err != nil {
+	d := NewDispatcher(1, nil)
+	_ = e.SetDispatcher(d)
+	if err := d.init(); err != nil {
 		t.Fatal(err)
 	}
-	data1, err := n.engine.getSnapshot()
+	data1, err := d.engine.getSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = enforcer.AddPolicies([][]string{{"eve", "data3", "write"}})
-	data2, err := n.engine.getSnapshot()
+	_, _ = e.AddPolicy("eve", "data3", "write")
+	data2, err := d.engine.getSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, _ = enforcer.RemovePolicies([][]string{{"bob", "data2", "write"}})
-	data3, err := n.engine.getSnapshot()
+	_, _ = e.RemovePolicy("bob", "data2", "write")
+	data3, err := d.engine.getSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -709,72 +789,10 @@ func TestProcessSnapshot(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		err = n.processSnapshot(tt.snapshot)
+		err = d.processSnapshot(tt.snapshot)
 		if err != nil {
 			t.Fatal(err)
 		}
-		testGetPolicy(t, n.engine, tt.res)
+		testGetPolicy(t, &node{e, d}, tt.res)
 	}
-}
-
-func TestModifyPolicyAPI(t *testing.T) {
-	e, _ := casbin.NewEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
-	_ = os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
-	_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
-	peers := make(map[uint64]string)
-	peers[1] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
-	node := NewNode(1, peers)
-	_ = e.SetDispatcher(node)
-	go func() {
-		if err := node.Start(); err != nil {
-			panic(err)
-		}
-	}()
-	<-time.After(time.Second * 3)
-	testEnforcerGetPolicy(t, e, [][]string{
-		{"alice", "data1", "read"},
-		{"bob", "data2", "write"},
-		{"data2_admin", "data2", "read"},
-		{"data2_admin", "data2", "write"}})
-
-	_, _ = e.RemovePolicy("alice", "data1", "read")
-	_, _ = e.RemovePolicy("bob", "data2", "write")
-	_, _ = e.RemovePolicy("alice", "data1", "read")
-	_, _ = e.AddPolicy("eve", "data3", "read")
-	_, _ = e.AddPolicy("eve", "data3", "read")
-	<-time.After(time.Second * 3)
-	rules := [][]string{
-		{"jack", "data4", "read"},
-		{"jack", "data4", "read"},
-		{"jack", "data4", "read"},
-		{"katy", "data4", "write"},
-		{"leyo", "data4", "read"},
-		{"katy", "data4", "write"},
-		{"katy", "data4", "write"},
-		{"ham", "data4", "write"},
-	}
-
-	_, _ = e.AddPolicies(rules)
-	_, _ = e.AddPolicies(rules)
-	<-time.After(time.Second * 3)
-	testEnforcerGetPolicy(t, e, [][]string{
-		{"data2_admin", "data2", "read"},
-		{"data2_admin", "data2", "write"},
-		{"eve", "data3", "read"},
-		{"jack", "data4", "read"},
-		{"katy", "data4", "write"},
-		{"leyo", "data4", "read"},
-		{"ham", "data4", "write"}})
-
-	_, _ = e.RemovePolicies(rules)
-	_, _ = e.RemovePolicies(rules)
-	<-time.After(time.Second * 3)
-	testEnforcerGetPolicy(t, e, [][]string{
-		{"data2_admin", "data2", "read"},
-		{"data2_admin", "data2", "write"},
-		{"eve", "data3", "read"}})
-
-	_, _ = e.RemoveFilteredPolicy(1, "data2")
-	<-time.After(time.Second * 3)
-	testEnforcerGetPolicy(t, e, [][]string{{"eve", "data3", "read"}})
 }
