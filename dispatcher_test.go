@@ -223,31 +223,32 @@ func TestModifyPolicyCluster(t *testing.T) {
 	testClusterGetPolicy(t, c, [][]string{{"eve", "data3", "read"}})
 }
 
-// func TestModifyRBACPolicy(t *testing.T) {
-// 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
-// 	_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
-// 	peers := make(map[uint64]string)
-// 	peers[1] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
-// 	enforcer, err := casbin.NewEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
-// 	if err != nil {
-// 		t.Fatal(err)
-// 	}
-// 	node := NewDispatcher(1, peers)
-// 	_ = node.SetEnforcer(enforcer)
-// 	go func() {
-// 		if err := node.Start(); err != nil {
-// 			panic(err)
-// 		}
-// 	}()
-// 	<-time.After(time.Second * 3)
-// 	_ = node.AddPolicies("g", "g", [][]string{{"bob", "data2_admin"}})
-// 	_ = node.RemovePolicies("g", "g", [][]string{{"alice", "data2_admin"}})
-// 	<-time.After(time.Second * 3)
-// 	testEnforce(t, node, "alice", "data2", "read", false)
-// 	testEnforce(t, node, "alice", "data2", "write", false)
-// 	testEnforce(t, node, "bob", "data2", "read", true)
-// 	testEnforce(t, node, "bob", "data2", "write", true)
-// }
+func TestModifyRBACPolicy(t *testing.T) {
+	_ = os.RemoveAll(fmt.Sprintf("casbin-%d", 1))
+	_ = os.RemoveAll(fmt.Sprintf("casbin-%d-snap", 1))
+	peers := make(map[uint64]string)
+	peers[1] = fmt.Sprintf("http://127.0.0.1:%d", GetFreePort())
+	e, err := casbin.NewEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewDispatcher(1, peers)
+	_ = e.SetDispatcher(d)
+	e.EnableautoNotifyDispatcher(true)
+	go func() {
+		if err := d.Start(); err != nil {
+			panic(err)
+		}
+	}()
+	<-time.After(time.Second * 3)
+	_, _ = e.AddGroupingPolicy("bob", "data2_admin")
+	_, _ = e.RemoveGroupingPolicy("alice", "data2_admin")
+	<-time.After(time.Second * 3)
+	testEnforce(t, &node{e, d}, "alice", "data2", "read", false)
+	testEnforce(t, &node{e, d}, "alice", "data2", "write", false)
+	testEnforce(t, &node{e, d}, "bob", "data2", "read", true)
+	testEnforce(t, &node{e, d}, "bob", "data2", "write", true)
+}
 
 func TestAddMember(t *testing.T) {
 	peers := make(map[uint64]string)
