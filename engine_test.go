@@ -364,11 +364,11 @@ type fakeAdapter struct{}
 
 var _ persist.Adapter = &fakeAdapter{}
 
-func (a *fakeAdapter) LoadPolicy(model model.Model) error {
+func (a *fakeAdapter) LoadPolicy(model *model.Model) error {
 	return nil
 }
 
-func (a *fakeAdapter) SavePolicy(model model.Model) error {
+func (a *fakeAdapter) SavePolicy(model *model.Model) error {
 	return nil
 }
 

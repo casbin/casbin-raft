@@ -540,9 +540,7 @@ func (d *Dispatcher) RemoveMember(id uint64) error {
 // AddPolicies add policies to casbin enforcer
 // This function will be call by casbin. Please call casbin ManagementAPI for use.
 func (d *Dispatcher) AddPolicies(sec string, ptype string, rules [][]string) error {
-	if d.engine.enforcer.GetModel().HasPolicies(sec, ptype, rules) {
-		return errors.New("policy already exists")
-	}
+	rules = d.engine.enforcer.GetModel().RemoveExistPolicy(sec, ptype, rules)
 
 	command := Command{
 		Op:    addCommand,
@@ -561,10 +559,7 @@ func (d *Dispatcher) AddPolicies(sec string, ptype string, rules [][]string) err
 // RemovePolicies remove policies from casbin enforcer
 // This function will be call by casbin. Please call casbin ManagementAPI for use.
 func (d *Dispatcher) RemovePolicies(sec string, ptype string, rules [][]string) error {
-	if !d.engine.enforcer.GetModel().HasPolicies(sec, ptype, rules) {
-		return errors.New("policy does not exist")
-	}
-
+	rules = d.engine.enforcer.GetModel().RemoveNotExistPolicy(sec, ptype, rules)
 	command := Command{
 		Op:    removeCommand,
 		Sec:   sec,
