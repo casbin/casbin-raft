@@ -23,7 +23,6 @@ import (
 	"sync/atomic"
 
 	"github.com/casbin/casbin/v3"
-	"github.com/casbin/casbin/v3/internal"
 	"github.com/casbin/casbin/v3/persist"
 	"github.com/casbin/casbin/v3/util"
 )
@@ -37,10 +36,9 @@ const (
 
 // Engine is a wapper for casbin enforcer
 type Engine struct {
-	enforcer      *casbin.Enforcer
-	policyManager internal.PolicyManager
-	isLeader      uint32
-	mutex         sync.Mutex
+	enforcer *casbin.Enforcer
+	isLeader uint32
+	mutex    sync.Mutex
 }
 
 // Command represents an instruction to change the state of the engine
@@ -55,8 +53,7 @@ type Command struct {
 
 func newEngine(enforcer *casbin.Enforcer) *Engine {
 	return &Engine{
-		enforcer:      enforcer,
-		policyManager: enforcer.GetPolicyManager(),
+		enforcer: enforcer,
 	}
 }
 
@@ -67,18 +64,18 @@ func (e *Engine) Apply(c Command) {
 	shouldPersist := atomic.LoadUint32(&e.isLeader) == 1
 	switch c.Op {
 	case addCommand:
-		_, _, err := e.policyManager.AddPolicies(c.Sec, c.Ptype, c.Rules, shouldPersist)
+		_, _, err := e.enforcer.GetPolicyManager().AddPolicies(c.Sec, c.Ptype, c.Rules, shouldPersist)
 		if err != nil {
 			// need a way to notify the caller, panic temporarily, the same as following
 			panic(err)
 		}
 	case removeCommand:
-		_, _, err := e.policyManager.RemovePolicies(c.Sec, c.Ptype, c.Rules, shouldPersist)
+		_, _, err := e.enforcer.GetPolicyManager().RemovePolicies(c.Sec, c.Ptype, c.Rules, shouldPersist)
 		if err != nil {
 			panic(err)
 		}
 	case removeFilteredCommand:
-		_, _, err := e.policyManager.RemoveFilteredPolicy(c.Sec, c.Ptype, shouldPersist, c.FiledIndex, c.FiledValues...)
+		_, _, err := e.enforcer.GetPolicyManager().RemoveFilteredPolicy(c.Sec, c.Ptype, shouldPersist, c.FiledIndex, c.FiledValues...)
 		if err != nil {
 			panic(err)
 		}
