@@ -19,7 +19,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/coreos/etcd/raft/raftpb"
+	"go.etcd.io/etcd/raft/raftpb"
 )
 
 func testClusterMembers(t *testing.T, c *Cluster, res map[uint64]string) {
@@ -29,9 +29,7 @@ func testClusterMembers(t *testing.T, c *Cluster, res map[uint64]string) {
 }
 
 func newTestCluster(peers []string) *Cluster {
-	c := &Cluster{
-		members: make(map[uint64]string),
-	}
+	c := NewCluster(make(map[uint64]string))
 
 	for i, v := range peers {
 		c.members[uint64(i+1)] = v

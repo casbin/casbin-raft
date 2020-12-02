@@ -19,26 +19,30 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"github.com/casbin/casbin-raft/pkg/util"
 	"log"
 	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"sync/atomic"
 	"time"
 
-	"github.com/casbin/casbin/v3"
-	"github.com/coreos/etcd/etcdserver/stats"
-	"github.com/coreos/etcd/pkg/transport"
-	"github.com/coreos/etcd/pkg/types"
-	"github.com/coreos/etcd/raft"
-	"github.com/coreos/etcd/raft/raftpb"
-	"github.com/coreos/etcd/rafthttp"
-	"github.com/coreos/etcd/snap"
-	"github.com/coreos/etcd/wal"
-	"github.com/coreos/etcd/wal/walpb"
+	"go.etcd.io/etcd/etcdserver/api/rafthttp"
+	"go.etcd.io/etcd/etcdserver/api/snap"
+	stats "go.etcd.io/etcd/etcdserver/api/v2stats"
+	"go.etcd.io/etcd/pkg/transport"
+	"go.etcd.io/etcd/pkg/types"
+	"go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/raft/raftpb"
+	"go.etcd.io/etcd/wal"
+	"go.etcd.io/etcd/wal/walpb"
+	"go.uber.org/zap"
+
+	"github.com/casbin/casbin/v2"
 	"github.com/pkg/errors"
 )
 
@@ -78,11 +82,15 @@ type Dispatcher struct {
 	keyFile   string
 	certFile  string
 	caFile    string
+
+	lg *zap.Logger
 }
+
+const DEFAULT_CONFIG_DIR = "casbin-raft-conf"
 
 // NewDispatcher return a instance of dispatcher, the peers is a collection of
 // id and url of all nodes in the cluster
-func NewDispatcher(id uint64, peers map[uint64]string, join ...bool) *Dispatcher {
+func NewDispatcher(ctx context.Context, enforcer casbin.IDistributedEnforcer, id uint64, peers map[uint64]string, join ...bool) (*Dispatcher, error) {
 	isJoin := false
 	if len(join) > 0 {
 		// the join parameter takes only the first to ignore the rest
@@ -90,9 +98,29 @@ func NewDispatcher(id uint64, peers map[uint64]string, join ...bool) *Dispatcher
 	}
 	store := raft.NewMemoryStorage()
 	membership := NewCluster(peers)
+
+	logger, err := zap.NewProduction()
+	if err != nil {
+		return nil, err
+	}
+
+	snapdir := fmt.Sprintf(path.Join(DEFAULT_CONFIG_DIR, "%d-snap"), id)
+	waldir := fmt.Sprintf(path.Join(DEFAULT_CONFIG_DIR, "%d-wald"), id)
+
+	exists, err := util.DirExists(DEFAULT_CONFIG_DIR)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		err := util.MkdirAll(DEFAULT_CONFIG_DIR)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	d := &Dispatcher{
 		id:     id,
-		ctx:    context.TODO(),
+		ctx:    ctx,
 		isJoin: isJoin,
 		store:  store,
 		cfg: &raft.Config{
@@ -106,23 +134,18 @@ func NewDispatcher(id uint64, peers map[uint64]string, join ...bool) *Dispatcher
 		membership: membership,
 		ticker:     time.NewTicker(100 * time.Millisecond),
 		done:       make(chan struct{}),
-		snapdir:    fmt.Sprintf("casbin-%d-snap", id),
+		snapdir:    snapdir,
 		snapCount:  defaultSnapshotCount,
-		waldir:     fmt.Sprintf("casbin-%d", id),
+		waldir:     waldir,
+		engine:     newEngine(enforcer),
+		lg:         logger,
 	}
 
-	return d
+	return d, nil
 }
 
-// SetEnforcer set up the instance that need to be maintained.
-// The parameter should be SyncedEnforced
-func (d *Dispatcher) SetEnforcer(enforcer interface{}) error {
-	value, ok := enforcer.(*casbin.Enforcer)
-	if !ok {
-		return errors.New("type of parameter should be *casbin.Enforcer")
-	}
-	d.engine = newEngine(value)
-	return nil
+func (d *Dispatcher) SetLogger(lg *zap.Logger, count uint64) {
+	d.lg = lg
 }
 
 // SetSnapshotCount set the number of logs that trigger a snapshot save.
@@ -187,7 +210,7 @@ func (d *Dispatcher) Start() error {
 // Restart init raft from wal and snapshot that already existing,
 // then begin serving requests
 func (d *Dispatcher) Restart() error {
-	d.snapshotter = snap.New(d.snapdir)
+	d.snapshotter = snap.New(d.lg, d.snapdir)
 	snapshot, err := d.snapshotter.Load()
 	if err != nil && err != snap.ErrNoSnapshot {
 		return errors.Wrap(err, "Failed loading snapshot")
@@ -206,7 +229,7 @@ func (d *Dispatcher) Restart() error {
 		}
 	}
 
-	d.wal, err = wal.Open(d.waldir, walsnap)
+	d.wal, err = wal.Open(d.lg, d.waldir, walsnap)
 	if err != nil {
 		return errors.Wrap(err, "Failed loading wal")
 	}
@@ -248,14 +271,14 @@ func (d *Dispatcher) init() error {
 		return errors.Wrap(err, "Failed creating snapshot dir")
 	}
 
-	d.snapshotter = snap.New(d.snapdir)
+	d.snapshotter = snap.New(d.lg, d.snapdir)
 
 	err := os.Mkdir(d.waldir, 0750)
 	if err != nil {
 		return errors.Wrap(err, "Failed creating WAL dir")
 	}
 
-	d.wal, err = wal.Create(d.waldir, nil)
+	d.wal, err = wal.Create(d.lg, d.waldir, nil)
 	if err != nil {
 		return errors.Wrap(err, "Failed creating WAL")
 	}
@@ -356,6 +379,7 @@ func (d *Dispatcher) initTransport() error {
 		ServerStats: stats.NewServerStats("", ""),
 		LeaderStats: stats.NewLeaderStats(strconv.Itoa(int(d.id))),
 		ErrorC:      make(chan error),
+		Logger:      d.lg,
 	}
 
 	if d.enableTLS {
@@ -537,11 +561,8 @@ func (d *Dispatcher) RemoveMember(id uint64) error {
 	return d.raft.ProposeConfChange(d.ctx, cc)
 }
 
-// AddPolicies add policies to casbin enforcer
-// This function will be call by casbin. Please call casbin ManagementAPI for use.
+// AddPolicies adds policies to casbin enforcer
 func (d *Dispatcher) AddPolicies(sec string, ptype string, rules [][]string) error {
-	rules = d.engine.enforcer.GetModel().RemoveExistPolicy(sec, ptype, rules)
-
 	command := Command{
 		Op:    addCommand,
 		Sec:   sec,
@@ -556,10 +577,8 @@ func (d *Dispatcher) AddPolicies(sec string, ptype string, rules [][]string) err
 	return d.raft.Propose(d.ctx, buf)
 }
 
-// RemovePolicies remove policies from casbin enforcer
-// This function will be call by casbin. Please call casbin ManagementAPI for use.
+// RemovePolicies removes policies from casbin enforcer
 func (d *Dispatcher) RemovePolicies(sec string, ptype string, rules [][]string) error {
-	rules = d.engine.enforcer.GetModel().RemoveNotExistPolicy(sec, ptype, rules)
 	command := Command{
 		Op:    removeCommand,
 		Sec:   sec,
@@ -574,8 +593,7 @@ func (d *Dispatcher) RemovePolicies(sec string, ptype string, rules [][]string) 
 	return d.raft.Propose(d.ctx, buf)
 }
 
-// RemoveFilteredPolicy  removes a role inheritance rule from the current named policy, field filters can be specified.
-// This function will be call by casbin. Please call casbin ManagementAPI for use.
+// RemoveFilteredPolicy removes a role inheritance rule from the current named policy, field filters can be specified.
 func (d *Dispatcher) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int, fieldValues ...string) error {
 	command := Command{
 		Op:          removeFilteredCommand,
@@ -593,10 +611,26 @@ func (d *Dispatcher) RemoveFilteredPolicy(sec string, ptype string, fieldIndex i
 }
 
 // ClearPolicy clears all policy.
-// This function will be call by casbin. Please call casbin ManagementAPI for use.
 func (d *Dispatcher) ClearPolicy() error {
 	command := Command{
 		Op: clearCommand,
+	}
+
+	buf, err := json.Marshal(command)
+	if err != nil {
+		return err
+	}
+	return d.raft.Propose(d.ctx, buf)
+}
+
+// UpdatePolicy updates policy rule from all instance.
+func (d *Dispatcher) UpdatePolicy(sec string, ptype string, oldRule, newRule []string) error {
+	command := Command{
+		Op:      updateCommand,
+		Sec:     sec,
+		Ptype:   ptype,
+		OldRule: oldRule,
+		NewRule: newRule,
 	}
 
 	buf, err := json.Marshal(command)

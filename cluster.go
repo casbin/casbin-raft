@@ -17,19 +17,20 @@ package casbinraft
 import (
 	"sync"
 
-	"github.com/coreos/etcd/raft/raftpb"
+	"go.etcd.io/etcd/raft/raftpb"
 )
 
 // Cluster manage the node id and url
 type Cluster struct {
 	members map[uint64]string
-	mutex   sync.RWMutex
+	mutex   *sync.RWMutex
 }
 
 // NewCluster create a Cluster frome map
 func NewCluster(peers map[uint64]string) *Cluster {
 	return &Cluster{
 		members: peers,
+		mutex:   &sync.RWMutex{},
 	}
 }
 

@@ -5,12 +5,7 @@ casbin-raft is the `Dispatcher` for Casbin. Provide a way to synchronize increme
 ## Installation
 
 ```
-    go get -u github.com/casbin/casbin-raft
-```
-Only casbin v3 supports the use of dispatcher, so you need to use the code of the beta branch
-
-```
-    go get -u github.com/casbin/casbin/v3@beta
+go get -u github.com/casbin/casbin-raft
 ```
 
 ## Simple Example
@@ -19,22 +14,23 @@ Only casbin v3 supports the use of dispatcher, so you need to use the code of th
 package main
 
 import (
-	"github.com/casbin/casbin/v3"
+	"context"
+    "github.com/casbin/casbin/v2"
 	casbinraft "github.com/casbin/casbin-raft"
 )
 
 func main() {
     // Must guarantee that the initial state of all instances is the same, 
-    e, _ := casbin.NewSyncedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+    e, _ := casbin.NewDistributedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
 
     // Need to provide the ID and URL of all nodes in the cluster. 
     peers := make(map[uint64]string)
     peers[1] = "127.0.0.1:8001"
     peers[2] = "127.0.0.1:8002"
-    d := casbinraft.NewDispathcer(1, peers)
+    d, _ := casbinraft.NewDispatcher(context.Background(), e, 1, peers)
 
-    e.SetDispathcer(d)
-    e.EnableautoNotifyDispatcher(true)
+    e.SetDispatcher(d)
+    e.EnableAutoNotifyDispatcher(true)
 
     go d.Start()
 
@@ -53,14 +49,14 @@ casbin-raft supports dynamically adding/removing nodes while runtime, for the ne
     peers[2] = "http://127.0.0.1:8002"
     peers[3] = "http://127.0.0.1:8003"
     peers[4] = "http://127.0.0.1:8004"
-    e, err := casbin.NewEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
+    e, err := casbin.NewDistributedEnforcer("examples/basic_model.conf", "examples/basic_policy.csv")
     if err != nil {
-        t.Fatal(err)
+        log.Fatal(err)
     }
 
-    d := casbinraft.NewDispatcher(4, peers, true)
-    _ = e.SetDispatcher(d)
-    e.EnableautoNotifyDispatcher(true)
+    d, _ := casbinraft.NewDispatcher(context.Background(), 4, e, peers, true)
+    e.SetDispatcher(d)
+    e.EnableAutoNotifyDispatcher(true)
     
     go d.Start()
 ```

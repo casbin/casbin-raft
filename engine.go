@@ -18,13 +18,14 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
+	"log"
 	"strings"
 	"sync"
-	"sync/atomic"
 
-	"github.com/casbin/casbin/v3"
-	"github.com/casbin/casbin/v3/persist"
-	"github.com/casbin/casbin/v3/util"
+	"github.com/casbin/casbin/v2"
+	"github.com/casbin/casbin/v2/persist"
+	"github.com/casbin/casbin/v2/util"
 )
 
 const (
@@ -32,13 +33,14 @@ const (
 	removeCommand
 	removeFilteredCommand
 	clearCommand
+	updateCommand
 )
 
 // Engine is a wapper for casbin enforcer
 type Engine struct {
-	enforcer *casbin.Enforcer
+	enforcer casbin.IDistributedEnforcer
 	isLeader uint32
-	mutex    sync.Mutex
+	mutex    *sync.Mutex
 }
 
 // Command represents an instruction to change the state of the engine
@@ -49,46 +51,61 @@ type Command struct {
 	Rules       [][]string `json:"rules"`
 	FiledIndex  int        `json:"filed_index"`
 	FiledValues []string   `json:"filed_values"`
+	// UpdatePolicy Field
+	NewRule []string `json:"newRule"`
+	OldRule []string `json:"oldRule"`
 }
 
-func newEngine(enforcer *casbin.Enforcer) *Engine {
+func newEngine(enforcer casbin.IDistributedEnforcer) *Engine {
 	return &Engine{
 		enforcer: enforcer,
+		mutex:    &sync.Mutex{},
 	}
+}
+
+// shouldPersist checks whether adapter can be called. Note that only the leader can call adapter.
+func (e *Engine) shouldPersist() bool {
+	return e.isLeader == 1
 }
 
 // Apply applies a Raft log entry to the casbin engine.
 func (e *Engine) Apply(c Command) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf(fmt.Sprintf("panic: %v", r))
+		}
+	}()
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
-	shouldPersist := atomic.LoadUint32(&e.isLeader) == 1
 	switch c.Op {
 	case addCommand:
-		_, _, err := e.enforcer.GetPolicyManager().AddPolicies(c.Sec, c.Ptype, c.Rules, shouldPersist)
+		_, err := e.enforcer.AddPolicySelf(e.shouldPersist, c.Sec, c.Ptype, c.Rules)
 		if err != nil {
 			// need a way to notify the caller, panic temporarily, the same as following
 			panic(err)
 		}
 	case removeCommand:
-		_, _, err := e.enforcer.GetPolicyManager().RemovePolicies(c.Sec, c.Ptype, c.Rules, shouldPersist)
+		_, err := e.enforcer.RemovePolicySelf(e.shouldPersist, c.Sec, c.Ptype, c.Rules)
 		if err != nil {
 			panic(err)
 		}
 	case removeFilteredCommand:
-		_, _, err := e.enforcer.GetPolicyManager().RemoveFilteredPolicy(c.Sec, c.Ptype, shouldPersist, c.FiledIndex, c.FiledValues...)
+		_, err := e.enforcer.RemoveFilteredPolicySelf(e.shouldPersist, c.Sec, c.Ptype, c.FiledIndex, c.FiledValues...)
 		if err != nil {
 			panic(err)
 		}
 	case clearCommand:
-		e.enforcer.GetModel().ClearPolicy()
-		if atomic.LoadUint32(&e.isLeader) == 1 {
-			err := e.enforcer.SavePolicy()
-			if err != nil {
-				panic(err)
-			}
+		err := e.enforcer.ClearPolicySelf(e.shouldPersist)
+		if err != nil {
+			panic(err)
+		}
+	case updateCommand:
+		_, err := e.enforcer.UpdatePolicySelf(e.shouldPersist, c.Sec, c.Ptype, c.OldRule, c.NewRule)
+		if err != nil {
+			panic(err)
 		}
 	default:
-		panic(errors.New("wrong command option"))
+		panic(errors.New("unknown command"))
 	}
 }
 
@@ -96,18 +113,16 @@ func (e *Engine) Apply(c Command) {
 func (e *Engine) getSnapshot() ([]byte, error) {
 	var tmp bytes.Buffer
 	model := e.enforcer.GetModel()
-	ptypes := model.GetPtypes("p")
-	for _, ptype := range ptypes {
-		for _, rule := range model.GetPolicy("p", ptype) {
+	for ptype, ast := range model["p"] {
+		for _, rule := range ast.Policy {
 			tmp.WriteString(ptype + ", ")
 			tmp.WriteString(util.ArrayToString(rule))
 			tmp.WriteString("\n")
 		}
 	}
 
-	ptypes = model.GetPtypes("g")
-	for _, ptype := range ptypes {
-		for _, rule := range model.GetPolicy("g", ptype) {
+	for ptype, ast := range model["g"] {
+		for _, rule := range ast.Policy {
 			tmp.WriteString(ptype + ", ")
 			tmp.WriteString(util.ArrayToString(rule))
 			tmp.WriteString("\n")

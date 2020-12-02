@@ -14,35 +14,30 @@
 
 package casbinraft
 
+//go:generate mockgen -destination=./mocks/mock_adapter.go -package=mocks github.com/casbin/casbin/v2/persist Adapter
+
 import (
-	"log"
 	"testing"
 
-	"github.com/casbin/casbin/v3"
-	"github.com/casbin/casbin/v3/model"
-	"github.com/casbin/casbin/v3/persist"
-	"github.com/casbin/casbin/v3/util"
+	"github.com/casbin/casbin-raft/mocks"
+	"github.com/stretchr/testify/assert"
+
+	"github.com/casbin/casbin/v2"
+	"github.com/casbin/casbin/v2/util"
 )
 
 func testGetRoles(t *testing.T, e *Engine, res []string, name string, domain ...string) {
-	t.Helper()
 	myRes, err := e.enforcer.GetRolesForUser(name, domain...)
-	if err != nil {
-		t.Error("Roles for ", name, " could not be fetched: ", err.Error())
-	}
-	t.Log("Roles for ", name, ": ", myRes)
-
-	if !util.SetEquals(res, myRes) {
-		t.Error("Roles for ", name, ": ", myRes, ", supposed to be ", res)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, res, myRes)
 }
 
-func newTestEngine() *Engine {
-	enforcer, err := casbin.NewEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
+func newTestEngine() (*Engine, error) {
+	enforcer, err := casbin.NewDistributedEnforcer("examples/rbac_model.conf", "examples/rbac_policy.csv")
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	return newEngine(enforcer)
+	return newEngine(enforcer), nil
 }
 
 func testEngineGetPolicy(t *testing.T, e *Engine, res [][]string) {
@@ -56,7 +51,8 @@ func testEngineGetPolicy(t *testing.T, e *Engine, res [][]string) {
 }
 
 func TestEngineSnapshot(t *testing.T) {
-	e := newTestEngine()
+	e, err := newTestEngine()
+	assert.NoError(t, err)
 	testEngineGetPolicy(t, e, [][]string{
 		{"alice", "data1", "read"},
 		{"bob", "data2", "write"},
@@ -69,7 +65,7 @@ func TestEngineSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_ = e.enforcer.ClearPolicy()
+	e.enforcer.ClearPolicy()
 	testEngineGetPolicy(t, e, [][]string{})
 	err = e.recoverFromSnapshot(data)
 	if err != nil {
@@ -85,7 +81,8 @@ func TestEngineSnapshot(t *testing.T) {
 }
 
 func TestEngineApplyPolicy(t *testing.T) {
-	e := newTestEngine()
+	e, err := newTestEngine()
+	assert.NoError(t, err)
 	testEngineGetPolicy(t, e, [][]string{
 		{"alice", "data1", "read"},
 		{"bob", "data2", "write"},
@@ -242,7 +239,8 @@ func TestEngineApplyPolicy(t *testing.T) {
 }
 
 func TestEngineApplyGroupPolicy(t *testing.T) {
-	e := newTestEngine()
+	e, err := newTestEngine()
+	assert.NoError(t, err)
 	testGetRoles(t, e, []string{"data2_admin"}, "alice")
 	testGetRoles(t, e, []string{}, "bob")
 	testGetRoles(t, e, []string{}, "eve")
@@ -283,7 +281,7 @@ func TestEngineApplyGroupPolicy(t *testing.T) {
 }
 
 func TestEngineLeader(t *testing.T) {
-	enforcer, err := casbin.NewEnforcer("examples/rbac_model.conf", new(fakeAdapter))
+	enforcer, err := casbin.NewDistributedEnforcer("examples/rbac_model.conf", new(mocks.MockAdapter))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,44 +356,4 @@ func TestEngineLeader(t *testing.T) {
 		e.Apply(tt.c)
 		testEngineGetPolicy(t, e, tt.res)
 	}
-}
-
-type fakeAdapter struct{}
-
-var _ persist.Adapter = &fakeAdapter{}
-
-func (a *fakeAdapter) LoadPolicy(model *model.Model) error {
-	return nil
-}
-
-func (a *fakeAdapter) SavePolicy(model *model.Model) error {
-	return nil
-}
-
-func (a *fakeAdapter) AddPolicy(sec string, ptype string, rule []string) error {
-	log.Printf("add policy: %s, %s, %s", sec, ptype, rule)
-	return nil
-}
-
-func (a *fakeAdapter) RemovePolicy(sec string, ptype string, rule []string) error {
-	log.Printf("remove policy: %s, %s, %s", sec, ptype, rule)
-	return nil
-}
-
-func (a *fakeAdapter) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int, fieldValues ...string) error {
-	return nil
-}
-
-func (a *fakeAdapter) AddPolicies(sec string, ptype string, rules [][]string) error {
-	for _, rule := range rules {
-		log.Printf("add policy: %s, %s, %s", sec, ptype, rule)
-	}
-	return nil
-}
-
-func (a *fakeAdapter) RemovePolicies(sec string, ptype string, rules [][]string) error {
-	for _, rule := range rules {
-		log.Printf("remove policy: %s, %s, %s", sec, ptype, rule)
-	}
-	return nil
 }
