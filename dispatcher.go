@@ -19,17 +19,18 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"github.com/casbin/casbin-raft/pkg/util"
 	"log"
 	"math"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"github.com/casbin/casbin-raft/pkg/util"
+	"github.com/casbin/casbin/v2"
 
 	"go.etcd.io/etcd/etcdserver/api/rafthttp"
 	"go.etcd.io/etcd/etcdserver/api/snap"
@@ -42,7 +43,6 @@ import (
 	"go.etcd.io/etcd/wal/walpb"
 	"go.uber.org/zap"
 
-	"github.com/casbin/casbin/v2"
 	"github.com/pkg/errors"
 )
 
@@ -54,16 +54,16 @@ const (
 
 // Dispatcher is a casbin enforcer backed by raft
 type Dispatcher struct {
-	id         uint64
-	isJoin     bool
-	ctx        context.Context
-	engine     *Engine
-	store      *raft.MemoryStorage
-	cfg        *raft.Config
-	raft       raft.Node
-	membership *Cluster
-	ticker     *time.Ticker
-	done       chan struct{}
+	id          uint64
+	isJoin      bool
+	ctx         context.Context
+	engine      *Engine
+	raftStorage *raft.MemoryStorage
+	cfg         *raft.Config
+	raft        raft.Node
+	membership  *Cluster
+	ticker      *time.Ticker
+	done        chan struct{}
 
 	snapdir     string
 	snapshotter *snap.Snapshotter
@@ -83,19 +83,14 @@ type Dispatcher struct {
 	certFile  string
 	caFile    string
 
-	lg *zap.Logger
+	logger *zap.Logger
 }
 
-const DEFAULT_CONFIG_DIR = "casbin-raft-conf"
+const DefaultDataDir = "casbin-raft-data"
 
 // NewDispatcher return a instance of dispatcher, the peers is a collection of
 // id and url of all nodes in the cluster
-func NewDispatcher(ctx context.Context, enforcer casbin.IDistributedEnforcer, id uint64, peers map[uint64]string, join ...bool) (*Dispatcher, error) {
-	isJoin := false
-	if len(join) > 0 {
-		// the join parameter takes only the first to ignore the rest
-		isJoin = join[0]
-	}
+func NewDispatcher(ctx context.Context, enforcer casbin.IDistributedEnforcer, id uint64, peers map[uint64]string, join bool) (*Dispatcher, error) {
 	store := raft.NewMemoryStorage()
 	membership := NewCluster(peers)
 
@@ -104,25 +99,29 @@ func NewDispatcher(ctx context.Context, enforcer casbin.IDistributedEnforcer, id
 		return nil, err
 	}
 
-	snapdir := fmt.Sprintf(path.Join(DEFAULT_CONFIG_DIR, "%d-snap"), id)
-	waldir := fmt.Sprintf(path.Join(DEFAULT_CONFIG_DIR, "%d-wald"), id)
+	snapdir := fmt.Sprintf(path.Join(DefaultDataDir, "%d-snap"), id)
+	waldir := fmt.Sprintf(path.Join(DefaultDataDir, "%d-wald"), id)
 
-	exists, err := util.DirExists(DEFAULT_CONFIG_DIR)
+	exists, err := util.DirExists(DefaultDataDir)
 	if err != nil {
 		return nil, err
 	}
 	if !exists {
-		err := util.MkdirAll(DEFAULT_CONFIG_DIR)
+		err := util.MkdirAll(DefaultDataDir)
 		if err != nil {
 			return nil, err
 		}
 	}
 
+	engine, err := newEngine(nil, enforcer)
+	if err != nil {
+		return nil, err
+	}
 	d := &Dispatcher{
-		id:     id,
-		ctx:    ctx,
-		isJoin: isJoin,
-		store:  store,
+		id:          id,
+		ctx:         ctx,
+		isJoin:      join,
+		raftStorage: store,
 		cfg: &raft.Config{
 			ID:              id,
 			ElectionTick:    defaultElectionTick,
@@ -137,15 +136,22 @@ func NewDispatcher(ctx context.Context, enforcer casbin.IDistributedEnforcer, id
 		snapdir:    snapdir,
 		snapCount:  defaultSnapshotCount,
 		waldir:     waldir,
-		engine:     newEngine(enforcer),
-		lg:         logger,
+		engine:     engine,
+		logger:     logger,
 	}
 
+	if d.logger == nil {
+		logger, err := zap.NewProduction()
+		if err != nil {
+			return nil, err
+		}
+		d.logger = logger
+	}
 	return d, nil
 }
 
 func (d *Dispatcher) SetLogger(lg *zap.Logger, count uint64) {
-	d.lg = lg
+	d.logger = lg
 }
 
 // SetSnapshotCount set the number of logs that trigger a snapshot save.
@@ -154,13 +160,13 @@ func (d *Dispatcher) SetSnapshotCount(count uint64) {
 	d.snapCount = count
 }
 
-// SetSnapDirName set the directory name that store sanpshot file.
+// SetSnapDirName set the directory name that raftStorage sanpshot file.
 // This function must be called before call node.Start().
 func (d *Dispatcher) SetSnapDirName(name string) {
 	d.snapdir = name
 }
 
-// SetWalDirName set the directory name that store write ahead log file.
+// SetWalDirName set the directory name that raftStorage write ahead log file.
 // This function must be called before call node.Start().
 func (d *Dispatcher) SetWalDirName(name string) {
 	d.waldir = name
@@ -207,55 +213,6 @@ func (d *Dispatcher) Start() error {
 	return d.run()
 }
 
-// Restart init raft from wal and snapshot that already existing,
-// then begin serving requests
-func (d *Dispatcher) Restart() error {
-	d.snapshotter = snap.New(d.lg, d.snapdir)
-	snapshot, err := d.snapshotter.Load()
-	if err != nil && err != snap.ErrNoSnapshot {
-		return errors.Wrap(err, "Failed loading snapshot")
-	}
-
-	walsnap := walpb.Snapshot{}
-	if snapshot != nil {
-		walsnap.Index, walsnap.Term = snapshot.Metadata.Index, snapshot.Metadata.Term
-
-		if err := d.store.ApplySnapshot(*snapshot); err != nil {
-			return errors.Wrap(err, "Save snapshot to store fail")
-		}
-
-		if err := d.engine.recoverFromSnapshot(snapshot.Data); err != nil {
-			return errors.Wrap(err, "Recover from snapshot fail")
-		}
-	}
-
-	d.wal, err = wal.Open(d.lg, d.waldir, walsnap)
-	if err != nil {
-		return errors.Wrap(err, "Failed loading wal")
-	}
-
-	_, st, ents, err := d.wal.ReadAll()
-	if err != nil {
-		return errors.Wrap(err, "Failed reading WAL")
-	}
-
-	if err := d.store.SetHardState(st); err != nil {
-		return errors.Wrap(err, "Failed saving hard state")
-	}
-
-	if err := d.store.Append(ents); err != nil {
-		return errors.Wrap(err, "Failed saving log")
-	}
-	d.raft = raft.RestartNode(d.cfg)
-
-	if err := d.initTransport(); err != nil {
-		return errors.Wrap(err, "Failed init transport")
-	}
-
-	go d.serveRaft()
-	return d.run()
-}
-
 // Stop close the raft node and http server
 func (d *Dispatcher) Stop() {
 	close(d.done)
@@ -267,20 +224,20 @@ func (d *Dispatcher) Stop() {
 
 // init initialize the resources required by the raft node
 func (d *Dispatcher) init() error {
-	if err := os.Mkdir(d.snapdir, 0750); err != nil {
-		return errors.Wrap(err, "Failed creating snapshot dir")
-	}
-
-	d.snapshotter = snap.New(d.lg, d.snapdir)
-
-	err := os.Mkdir(d.waldir, 0750)
+	exists, err := util.DirExists(d.snapdir)
 	if err != nil {
-		return errors.Wrap(err, "Failed creating WAL dir")
+		return err
 	}
-
-	d.wal, err = wal.Create(d.lg, d.waldir, nil)
+	if !exists {
+		err = util.MkdirAll(d.snapdir)
+		if err != nil {
+			return errors.Wrap(err, "Failed creating snapshot dir")
+		}
+	}
+	d.snapshotter = snap.New(d.logger, d.snapdir)
+	d.wal, err = d.replayWAL()
 	if err != nil {
-		return errors.Wrap(err, "Failed creating WAL")
+		return err
 	}
 
 	var p []raft.Peer
@@ -290,17 +247,92 @@ func (d *Dispatcher) init() error {
 			p = append(p, raft.Peer{ID: k, Context: []byte(v)})
 		}
 	}
-
-	d.raft = raft.StartNode(d.cfg, p)
-
-	snap, err := d.store.Snapshot()
+	if wal.Exist(d.waldir) {
+		d.raft = raft.RestartNode(d.cfg)
+	} else {
+		d.raft = raft.StartNode(d.cfg, p)
+	}
+	snap, err := d.raftStorage.Snapshot()
 	if err != nil {
-		return errors.Wrap(err, "Failed getting snapshot from memorystore")
+		panic(err)
 	}
 	d.confState = &snap.Metadata.ConfState
 	d.snapshotIndex = snap.Metadata.Index
 	d.appliedIndex = snap.Metadata.Index
 	return nil
+}
+
+func (d *Dispatcher) loadSnapshot() (*raftpb.Snapshot, error) {
+	snapshot, err := d.snapshotter.Load()
+	if err != nil && err != snap.ErrNoSnapshot {
+		return nil, err
+	}
+	return snapshot, nil
+}
+
+// openWAL returns a WAL ready for reading.
+func (d *Dispatcher) openWAL(snapshot *raftpb.Snapshot) (*wal.WAL, error) {
+	if !wal.Exist(d.waldir) {
+		if err := util.MkdirAll(d.waldir); err != nil {
+			return nil, errors.Wrapf(err, "cannot create dir for wal")
+		}
+
+		w, err := wal.Create(d.logger, d.waldir, nil)
+		if err != nil {
+			return nil, errors.Wrapf(err, "create wal error")
+		}
+		err = w.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	walsnap := walpb.Snapshot{}
+	if snapshot != nil {
+		walsnap.Index, walsnap.Term = snapshot.Metadata.Index, snapshot.Metadata.Term
+	}
+	d.logger.Info(fmt.Sprintf("loading WAL at term %d and index %d", walsnap.Term, walsnap.Index))
+	w, err := wal.Open(d.logger, d.waldir, walsnap)
+	if err != nil {
+		return nil, errors.Wrapf(err, "error loading wal")
+	}
+
+	return w, nil
+}
+
+// replayWAL replays WAL entries into the raft instance.
+func (d *Dispatcher) replayWAL() (*wal.WAL, error) {
+	snapshot, err := d.loadSnapshot()
+	w, err := d.openWAL(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	_, st, ents, err := w.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	d.raftStorage = raft.NewMemoryStorage()
+	if snapshot != nil {
+		err := d.raftStorage.ApplySnapshot(*snapshot)
+		if err != nil {
+			return nil, err
+		}
+		err = d.engine.recoverFromSnapshot(snapshot.Data)
+		if err != nil {
+			return nil, err
+		}
+	}
+	err = d.raftStorage.SetHardState(st)
+	if err != nil {
+		return nil, err
+	}
+
+	// append to storage so raft starts at the right place in log
+	err = d.raftStorage.Append(ents)
+	if err != nil {
+		return nil, err
+	}
+	return w, nil
 }
 
 // serveRaft start the server for internal transmission of raft
@@ -363,7 +395,8 @@ func (d *Dispatcher) run() error {
 			d.raft.Advance()
 		case err := <-d.transport.ErrorC:
 			if err != nil {
-				log.Printf("Wrong raft transport (%s)", err)
+				d.logger.Error(fmt.Sprintf("Wrong raft transport: %v", err))
+				d.Stop()
 			}
 		case <-d.done:
 			return nil
@@ -379,7 +412,7 @@ func (d *Dispatcher) initTransport() error {
 		ServerStats: stats.NewServerStats("", ""),
 		LeaderStats: stats.NewLeaderStats(strconv.Itoa(int(d.id))),
 		ErrorC:      make(chan error),
-		Logger:      d.lg,
+		Logger:      d.logger,
 	}
 
 	if d.enableTLS {
@@ -409,9 +442,9 @@ func (d *Dispatcher) triggerSnapshot() {
 		log.Printf("Failed getting snapshot data (%v)", err)
 	}
 
-	snap, err := d.store.CreateSnapshot(d.appliedIndex, d.confState, data)
+	snap, err := d.raftStorage.CreateSnapshot(d.appliedIndex, d.confState, data)
 	if err != nil {
-		log.Printf("Can't create snapshot from memory store (%v)", err)
+		log.Printf("Can't create snapshot from memory raftStorage (%v)", err)
 	}
 
 	if err := d.snapshotter.SaveSnap(snap); err != nil {
@@ -422,18 +455,18 @@ func (d *Dispatcher) triggerSnapshot() {
 }
 
 func (d *Dispatcher) saveToStorage(hardState raftpb.HardState, entries []raftpb.Entry, snapshot raftpb.Snapshot) {
-	if err := d.store.Append(entries); err != nil {
+	if err := d.raftStorage.Append(entries); err != nil {
 		log.Printf("Failed storing entries (%v)", err)
 	}
 
 	if !raft.IsEmptyHardState(hardState) {
-		if err := d.store.SetHardState(hardState); err != nil {
+		if err := d.raftStorage.SetHardState(hardState); err != nil {
 			log.Printf("Failed storing hardstate (%v)", err)
 		}
 	}
 
 	if !raft.IsEmptySnap(snapshot) {
-		if err := d.store.ApplySnapshot(snapshot); err != nil {
+		if err := d.raftStorage.ApplySnapshot(snapshot); err != nil {
 			log.Printf("Failed storing snapshot (%v)", err)
 		}
 	}
@@ -458,7 +491,7 @@ func (d *Dispatcher) processSnapshot(snap raftpb.Snapshot) error {
 		return err
 	}
 
-	if err := d.store.ApplySnapshot(snap); err != nil {
+	if err := d.raftStorage.ApplySnapshot(snap); err != nil {
 		return err
 	}
 

@@ -3,7 +3,7 @@ module github.com/casbin/casbin-raft
 go 1.15
 
 require (
-	github.com/casbin/casbin/v2 v2.19.2
+	github.com/casbin/casbin/v2 v2.19.4
 	github.com/golang/mock v1.4.4
 	github.com/pkg/errors v0.8.0
 	github.com/stretchr/testify v1.6.1

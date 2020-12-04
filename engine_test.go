@@ -14,16 +14,16 @@
 
 package casbinraft
 
-//go:generate mockgen -destination=./mocks/mock_adapter.go -package=mocks github.com/casbin/casbin/v2/persist Adapter
-
 import (
+	"log"
 	"testing"
 
-	"github.com/casbin/casbin-raft/mocks"
+	"github.com/casbin/casbin/v2/model"
+	"github.com/casbin/casbin/v2/persist"
+
 	"github.com/stretchr/testify/assert"
 
 	"github.com/casbin/casbin/v2"
-	"github.com/casbin/casbin/v2/util"
 )
 
 func testGetRoles(t *testing.T, e *Engine, res []string, name string, domain ...string) {
@@ -37,17 +37,13 @@ func newTestEngine() (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newEngine(enforcer), nil
+	return newEngine(nil, enforcer)
 }
 
 func testEngineGetPolicy(t *testing.T, e *Engine, res [][]string) {
 	t.Helper()
 	myRes := e.enforcer.GetPolicy()
-	t.Log("Policy: ", myRes)
-
-	if !util.Array2DEquals(res, myRes) {
-		t.Error("Policy: ", myRes, ", supposed to be ", res)
-	}
+	assert.Equal(t, res, myRes)
 }
 
 func TestEngineSnapshot(t *testing.T) {
@@ -66,7 +62,7 @@ func TestEngineSnapshot(t *testing.T) {
 	}
 
 	e.enforcer.ClearPolicy()
-	testEngineGetPolicy(t, e, [][]string{})
+	testEngineGetPolicy(t, e, nil)
 	err = e.recoverFromSnapshot(data)
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +224,7 @@ func TestEngineApplyPolicy(t *testing.T) {
 			Command{
 				Op: clearCommand,
 			},
-			[][]string{},
+			nil,
 		},
 	}
 
@@ -281,11 +277,12 @@ func TestEngineApplyGroupPolicy(t *testing.T) {
 }
 
 func TestEngineLeader(t *testing.T) {
-	enforcer, err := casbin.NewDistributedEnforcer("examples/rbac_model.conf", new(mocks.MockAdapter))
+	enforcer, err := casbin.NewDistributedEnforcer("examples/rbac_model.conf", new(fakeAdapter))
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := newEngine(enforcer)
+	e, err := newEngine(nil, enforcer)
+	assert.NoError(t, err)
 	e.isLeader = 1
 
 	tests := []struct {
@@ -356,4 +353,44 @@ func TestEngineLeader(t *testing.T) {
 		e.Apply(tt.c)
 		testEngineGetPolicy(t, e, tt.res)
 	}
+}
+
+type fakeAdapter struct{}
+
+var _ persist.Adapter = &fakeAdapter{}
+
+func (a *fakeAdapter) LoadPolicy(model model.Model) error {
+	return nil
+}
+
+func (a *fakeAdapter) SavePolicy(model model.Model) error {
+	return nil
+}
+
+func (a *fakeAdapter) AddPolicy(sec string, ptype string, rule []string) error {
+	log.Printf("add policy: %s, %s, %s", sec, ptype, rule)
+	return nil
+}
+
+func (a *fakeAdapter) RemovePolicy(sec string, ptype string, rule []string) error {
+	log.Printf("remove policy: %s, %s, %s", sec, ptype, rule)
+	return nil
+}
+
+func (a *fakeAdapter) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int, fieldValues ...string) error {
+	return nil
+}
+
+func (a *fakeAdapter) AddPolicies(sec string, ptype string, rules [][]string) error {
+	for _, rule := range rules {
+		log.Printf("add policy: %s, %s, %s", sec, ptype, rule)
+	}
+	return nil
+}
+
+func (a *fakeAdapter) RemovePolicies(sec string, ptype string, rules [][]string) error {
+	for _, rule := range rules {
+		log.Printf("remove policy: %s, %s, %s", sec, ptype, rule)
+	}
+	return nil
 }

@@ -17,9 +17,7 @@ package casbinraft
 import (
 	"bufio"
 	"bytes"
-	"errors"
-	"fmt"
-	"log"
+	"go.uber.org/zap"
 	"strings"
 	"sync"
 
@@ -41,6 +39,7 @@ type Engine struct {
 	enforcer casbin.IDistributedEnforcer
 	isLeader uint32
 	mutex    *sync.Mutex
+	logger   *zap.Logger
 }
 
 // Command represents an instruction to change the state of the engine
@@ -56,11 +55,20 @@ type Command struct {
 	OldRule []string `json:"oldRule"`
 }
 
-func newEngine(enforcer casbin.IDistributedEnforcer) *Engine {
-	return &Engine{
+func newEngine(logger *zap.Logger, enforcer casbin.IDistributedEnforcer) (*Engine, error) {
+	e := &Engine{
 		enforcer: enforcer,
 		mutex:    &sync.Mutex{},
+		logger:   logger,
 	}
+	if e.logger == nil {
+		logger, err := zap.NewProduction()
+		if err != nil {
+			return nil, err
+		}
+		e.logger = logger
+	}
+	return e, nil
 }
 
 // shouldPersist checks whether adapter can be called. Note that only the leader can call adapter.
@@ -70,42 +78,36 @@ func (e *Engine) shouldPersist() bool {
 
 // Apply applies a Raft log entry to the casbin engine.
 func (e *Engine) Apply(c Command) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf(fmt.Sprintf("panic: %v", r))
-		}
-	}()
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	switch c.Op {
 	case addCommand:
 		_, err := e.enforcer.AddPolicySelf(e.shouldPersist, c.Sec, c.Ptype, c.Rules)
 		if err != nil {
-			// need a way to notify the caller, panic temporarily, the same as following
-			panic(err)
+			e.logger.Panic(err.Error(), zap.Any("command", c))
 		}
 	case removeCommand:
 		_, err := e.enforcer.RemovePolicySelf(e.shouldPersist, c.Sec, c.Ptype, c.Rules)
 		if err != nil {
-			panic(err)
+			e.logger.Panic(err.Error(), zap.Any("command", c))
 		}
 	case removeFilteredCommand:
 		_, err := e.enforcer.RemoveFilteredPolicySelf(e.shouldPersist, c.Sec, c.Ptype, c.FiledIndex, c.FiledValues...)
 		if err != nil {
-			panic(err)
+			e.logger.Panic(err.Error(), zap.Any("command", c))
 		}
 	case clearCommand:
 		err := e.enforcer.ClearPolicySelf(e.shouldPersist)
 		if err != nil {
-			panic(err)
+			e.logger.Panic(err.Error(), zap.Any("command", c))
 		}
 	case updateCommand:
 		_, err := e.enforcer.UpdatePolicySelf(e.shouldPersist, c.Sec, c.Ptype, c.OldRule, c.NewRule)
 		if err != nil {
-			panic(err)
+			e.logger.Panic(err.Error(), zap.Any("command", c))
 		}
 	default:
-		panic(errors.New("unknown command"))
+		e.logger.Panic("unknown command", zap.Any("command", c))
 	}
 }
 
